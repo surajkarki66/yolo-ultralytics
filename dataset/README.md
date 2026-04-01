@@ -1,27 +1,62 @@
-# Dataset
+# Dataset Guide
 
-This directory is intended for the YOLO-formatted dataset used for training and evaluation by the main pipeline (`main.py`) and by the Vitis AI evaluation scripts.
+This folder holds the YOLO-format dataset consumed by `main.py`.
 
-## Human Presence Detection Dataset
+## Expected Layout
 
-The Human Presence Detection Dataset is a combination of VOC2012_Person and a private collection of images annotated with bounding boxes for detecting people. This dataset is designed for training and evaluating object detection models, mainly YOLO.
+```text
+dataset/
+  data.yaml
+  train/
+    images/
+    labels/
+  valid/
+    images/
+    labels/
+  test/            # optional for training, useful for final eval
+    images/
+    labels/
+```
 
-### Dataset details
+## Label Format
 
-- **Content:** Images of people in various settings (e.g., indoor, outdoor, different poses, lighting conditions).
-- **Sources:**
-  - Public: PASCAL VOC 2012 Person dataset.
-  - Private: Custom collection of images from Steinel GmbH.
-- **Annotations:** Bounding boxes in YOLO format, with class ID `0` representing "person".
-- **Image size:** Images are typically 640×640 pixels (adjust based on your dataset).
-- **Annotation format:** Text files (`.txt`) with one line per bounding box: `class_id x_center y_center width height` (normalized to [0, 1]).
+Each label file is YOLO normalized format:
 
-### Expected layout (YOLO format)
+```text
+class_id x_center y_center width height
+```
 
-Place your dataset under `dataset/` (or point `--data-dir` to it) with a structure such as:
+- one object per line
+- values normalized to `[0, 1]`
+- class IDs must match `data.yaml` names
 
-- `train/images/`, `train/labels/`
-- `valid/images/`, `valid/labels/`
-- `test/images/`, `test/labels/` (optional)
+## YOLO OBB Label Format
 
-Use `main.py eda` and `main.py visualize` to inspect the data.
+For oriented bounding boxes (OBB), each line stores 4 corner points:
+
+```text
+class_id x1 y1 x2 y2 x3 y3 x4 y4
+```
+
+- one object per line
+- `(x1, y1) ... (x4, y4)` are the four box corners in order around the object
+- coordinates are typically normalized to `[0, 1]` relative to image width/height
+- class IDs must match `data.yaml` names
+
+If your pipeline uses absolute pixel coordinates instead, keep that format consistent across
+training, conversion, and evaluation scripts.
+
+## Notes for This Project
+
+- Keep `data.yaml` class names aligned with your model task (detection vs OBB workflows).
+- Use consistent image extensions/casing across splits when possible (the CV pipeline supports common formats, but consistency helps reproducibility).
+- Ensure every image has a matching label file with the same stem.
+
+## Recommended Checks
+
+```bash
+python3 main.py eda --data-dir dataset --output-dir output
+python3 main.py visualize --data-dir dataset --output-dir output --num-samples 10
+```
+
+These commands validate split consistency and generate quick visual sanity checks.

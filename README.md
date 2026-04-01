@@ -1,186 +1,138 @@
-# Efficient Execution of Object Detection Algorithms on Edge Devices
+# Efficient YOLO Pipeline for Edge Deployment
 
-This project provides a comprehensive toolkit for training, evaluating, and deploying YOLO (You Only Look Once) object detection models, with a focus on optimizing performance for edge devices. It includes scripts for exploratory data analysis, data visualization, model training, testing, cross-validation, hyperparameter tuning, export to various formats, and deployment via **AMD Vitis AI** (quantization and compilation for FPGA).
+This repository provides an end-to-end workflow for YOLO model development and deployment:
 
-## 1. Project Structure
+- dataset checks and visualization
+- training, testing, tuning, benchmark, and export
+- Vitis AI quantization, compilation, and evaluation for Detect and OBB pipelines
 
-```
-.
-├── config.yaml
-├── custom_layers/
-│   ├── block.py
-│   └── conv.py
-├── dataset/
-│   └── README.md
-├── dataset_utils/
-│   ├── __init__.py
-│   ├── eda.py
-│   └── visualize_dataset.py
-├── main.py
-├── models/
-│   ├── assets/
-│   │   └── README.md
-│   └── yolo/
-│       ├── __init__.py
-│       ├── activation_converter.py
-│       ├── benchmark.py
-│       ├── cross_validation.py
-│       ├── export.py
-│       ├── hyperparameter_tuning.py
-│       ├── test.py
-│       ├── train.py
-│       └── utils.py
-├── patch_ultralytics.py
-├── pyproject.toml
-├── README.md
-├── requirements.txt
-└── vitis-ai/
-    ├── compilation/
-    │   ├── Architectures/
-    │   ├── README.md
-    │   ├── run_compile.sh
-    │   ├── YOLOv8/
-    │   └── YOLOv8-OBB/
-    ├── evaluation/
-    │   ├── Detect/
-    │   │   ├── coco_prep.py
-    │   │   ├── evaluate.py
-    │   │   ├── models/
-    │   │   ├── post_processing.py
-    │   │   ├── test_data/
-    │   │   ├── utils.py
-    │   │   └── visualize_output.py
-    │   ├── OBB/
-    │   │   ├── evaluate.py
-    │   │   ├── post_processing.py
-    │   │   ├── remove_dfl.py
-    │   │   └── test_data/
-    │   ├── README.md
-    │   └── pyproject.toml
-    └── quantization/
-        ├── custom_layers/
-        ├── data/
-        │   └── README.md
-        ├── README.md
-        ├── patch_ultralytics.py
-        ├── prepare_calibration_data.py
-        ├── run_compression.sh
-        ├── run_yolo_conversion.sh
-        ├── vai_q_yolo.py
-        └── yolo_converter.py
-```
+The main CLI entrypoint is `main.py`.
 
-## 2. Installation
+## Version Compatibility
 
-1. **Clone the repository:**
+- This repository can be adapted for multiple YOLO versions in general workflows.
+- For the Vitis AI-compatible training and deployment path in this repo, supported models are:
+  - `YOLOv26` (Detect)
+  - `YOLOv26-OBB` (Oriented Bounding Boxes)
 
-    ```bash
-    git clone https://github.com/your-username/your-repository.git
-    cd your-repository
-    ```
-
-2. **Install dependencies:**
-
-    It is recommended to use a virtual environment.
-
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
-    ```
-
-## 3. Dataset
-
-The project uses a YOLO-formatted dataset, which should be placed in the `dataset` directory. The dataset structure is expected to be in YOLO format with images and labels subdirectories for train, valid, and test splits. See `dataset/README.md` for details.
-
-## 4. Usage
-
-The main entry point for all functionalities is `main.py`. It uses a command-line interface with several subcommands.
-
-### 4.1. Exploratory Data Analysis (EDA)
-
-To perform EDA on the dataset, run:
+## Quick Start
 
 ```bash
-python3 main.py eda --data-dir <path-to-dataset> --output-dir <path-to-output>
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### 4.2. Visualize Dataset
-
-To visualize a few sample images with their annotations, run:
+## Main CLI
 
 ```bash
-python3 main.py visualize --data-dir <path-to-dataset> --output-dir <path-to-output> --num-samples 10
+python3 main.py eda --data-dir dataset --output-dir output
+python3 main.py visualize --data-dir dataset --output-dir output --num-samples 10
+python3 main.py train
+python3 main.py test
+python3 main.py cross-validation
+python3 main.py tune
+python3 main.py benchmark
+python3 main.py export
 ```
 
-### 4.3. Training
+## CLI Notes
 
-To train the model, run:
+- `visualize --num-samples` is applied per split (`train`, `valid`, `test`).
+- `eda` supports `.jpg`, `.jpeg`, and `.png`.
+- images missing label files are still counted by EDA (as zero-annotation images).
+- training/testing/tuning/export behavior is configured via `config.yaml`.
+
+## Project Areas
+
+- `dataset/` - dataset layout and label format (YOLO + YOLO OBB)
+- `dataset_utils/` - `eda.py` and `visualize_dataset.py`
+- `models/yolo/` - train/test/tune/export/benchmark/cross-validation modules
+- `vitis-ai/quantization/` - quantization scripts (without yolo_converter flow)
+- `vitis-ai/compilation/` - `.xmodel` compilation for target DPU architectures
+- `vitis-ai/evaluation/` - Detect and OBB post-processing + evaluation scripts
+
+## Vitis AI High-Level Flow
+
+1. Quantize model in `vitis-ai/quantization/`
+2. Compile in `vitis-ai/compilation/`
+3. Evaluate in `vitis-ai/evaluation/Detect/` or `vitis-ai/evaluation/OBB/`
+
+> **Note:** FPGA deployment through Vitis AI in this repository requires `ultralytics==8.4.24`.  
+> This is a strict dependency for the supported quantization/patching workflow.
+
+## End-to-End Workflow (Three Phases)
+
+### Phase 1: Training Phase
+
+```bash
+pip install -r requirements.txt
+```
+
+```bash
+python patch_ultralytics.py
+```
 
 ```bash
 python3 main.py train
 ```
 
-The training configuration can be modified in `config.yaml` under the `training` section.
+### Phase 2: Quantization Phase (inside Vitis AI)
 
-### 4.4. Testing
-
-To test the trained model, run:
+Activate the Vitis AI PyTorch environment first:
 
 ```bash
-python3 main.py test
+conda activate vitis-ai-pytorch
 ```
 
-The testing configuration can be modified in `config.yaml` under the `testing` section.
-
-### 4.5. Cross-Validation
-
-To perform k-fold cross-validation, run:
+Install quantization dependencies:
 
 ```bash
-python3 main.py cross-validation
+cd vitis-ai/quantization
+pip install -r requirements.txt
 ```
 
-The cross-validation configuration can be modified in `config.yaml` under the `cross_validation` section.
-
-### 4.6. Hyperparameter Tuning
-
-To perform hyperparameter tuning, run:
+Patch Ultralytics in the Vitis AI environment:
 
 ```bash
-python3 main.py tune
+cd vitis-ai/quantization
+python patch_ultralytics.py
 ```
 
-The hyperparameter tuning configuration can be modified in `config.yaml` under the `hyperparameter_tuning` section.
-
-### 4.7. Benchmark
-
-To benchmark the model's performance, run:
+Prepare calibration data:
 
 ```bash
-python3 main.py benchmark
+cd vitis-ai/quantization
+python prepare_calibration_data.py
 ```
 
-The benchmark configuration can be modified in `config.yaml` under the `benchmark` section.
-
-### 4.8. Export
-
-To export the model to a different format (e.g., ONNX, TFLite), run:
+Run quantization (calib then test). Use `--model_path` for your trained or converted `.pt` (match `--img_height` / `--img_width` to your model, e.g. 416):
 
 ```bash
-python3 main.py export
+cd vitis-ai/quantization
+python vai_q_yolo.py --model_path <trained_or_exported_model.pt> --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode calib
+python vai_q_yolo.py --model_path <trained_or_exported_model.pt> --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode test --deploy
 ```
 
-The export configuration can be modified in `config.yaml` under the `export` section.
+This generates quantized artifacts (including `.xmodel`) for deployment.
 
-## 5. Vitis AI Workflow
+### Phase 3: Compilation Phase
 
-For edge deployment on AMD FPGAs:
+```bash
+cd vitis-ai/compilation
+vai_c_xir -x YOLOv26/DetectionModel_int.xmodel -a Architectures/arch_B4096.json -o zynq_output/yolov26n/ -n yolov26n
+```
 
-1. **Quantization** — See `vitis-ai/quantization/README.md` for SiLU→HardSwish conversion, Ultralytics patching, and running Vitis AI quantization.
-2. **Compilation** — See `vitis-ai/compilation/README.md` for compiling quantized models for the target DPU.
-3. **Evaluation** — See `vitis-ai/evaluation/README.md` for evaluating quantized/compiled models (Detect and OBB).
+For OBB, compile the model under `YOLOv26-OBB/` with the matching output name.
 
-## 6. Configuration
+## Dataset Layout
 
-All configurations for the different steps are centralized in the `config.yaml` file. This file is divided into sections for `training`, `testing`, `cross_validation`, `hyperparameter_tuning`, `benchmark`, and `export`.
+```text
+dataset/
+  data.yaml
+  train/images  train/labels
+  valid/images  valid/labels
+  test/images   test/labels
+```
+
+For detailed label formats (standard YOLO and YOLO OBB), see `dataset/README.md`.

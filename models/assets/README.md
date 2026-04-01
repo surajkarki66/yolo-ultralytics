@@ -1,8 +1,8 @@
 # Model assets
 
-This directory is a placeholder for model-related assets used by the training and evaluation pipeline, such as:
+This directory stores model-related assets used by the training, testing, benchmark, and export pipeline, such as:
 
-- Pre-trained or checkpoint weights (e.g. `best.pt`, `last.pt`) produced by `main.py train`
-- Exported model files (e.g. ONNX, TFLite) from `main.py export`
+- Checkpoint weights (e.g. `best.pt`, `last.pt`) produced by `python3 main.py train`
+- Exported model files (e.g. ONNX, TensorRT engine) produced by `python3 main.py export`
 
-Keep this directory in version control; large weight files can be excluded via `.gitignore` and stored separately or in a model registry.
+Keep lightweight metadata/examples here, and exclude large weights via `.gitignore` or store them in an artifact/model registry.
