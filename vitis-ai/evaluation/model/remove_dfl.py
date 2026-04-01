@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import pickle
 
-INPUT_PATH = "YOLO_int_config.pkl"
-OUTPUT_PATH = "YOLO_int_config.pkl"
+INPUT_PATH = "config_yolov26.pkl"
+OUTPUT_PATH = "config_yolov26.pkl"
 
 
 # -------------------------------
@@ -46,7 +46,7 @@ def remove_dfl(obj):
 # -------------------------------
 with open(INPUT_PATH, "rb") as f:
     data = pickle.load(f)
-
+    print(data)
 print("Loaded successfully")
 
 # -------------------------------

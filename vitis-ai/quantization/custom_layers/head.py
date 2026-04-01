@@ -1,295 +1,640 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
-"""Model head modules."""
+# Ultralytics 🚀 AGPL-3.0 License
+from __future__ import annotations
 
 import math
 
 import torch
 import torch.nn as nn
-from torch.nn.init import constant_, xavier_uniform_
+from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_inference_mode
+from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 
-from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
-from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
-from .conv import Conv
-from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
-from .utils import bias_init_with_prob, linear_init
+from .block import DFL, Proto, Proto26
+from .conv import Conv, DWConv
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
+__all__ = (
+    "Detect",
+    "Segment",
+    "Segment26",
+    "OBB",
+    "Pose",
+    "Pose26",
+    "Classify",
+)
 
+
+# ============================================================================
+# Detect
+# ============================================================================
 
 class Detect(nn.Module):
-    """YOLOv8 Detect head for detection models."""
+    """
+    YOLOv26 Detect head — Only For Vitis AI DPU export
+    """
 
-    dynamic = False  # force grid reconstruction
-    export = False  # export mode
-    shape = None
-    anchors = torch.empty(0)  # init
-    strides = torch.empty(0)  # init
+    dynamic = False
+    export  = True
+    shape   = None
+    anchors = torch.empty(0)
+    strides = torch.empty(0)
+    legacy  = False
+    max_det = 300
 
-    def __init__(self, nc=80, ch=()):
-        """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
+    def __init__(self, nc: int = 80, reg_max: int = 16, ch: tuple = ()):
         super().__init__()
-        self.nc = nc  # number of classes
-        self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
-        self.stride = torch.zeros(self.nl)  # strides computed during build
-        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
-        self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
-        )
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
-        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+        self.nc      = nc
+        self.nl      = len(ch)
+        self.reg_max = reg_max
+        self.no      = nc + reg_max * 4
+        self.stride  = torch.zeros(self.nl)
 
-    def forward(self, x):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        c2 = max(16, ch[0] // 4, reg_max * 4)
+        c3 = max(ch[0], min(nc, 100))
+
+        self.cv2 = nn.ModuleList(
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * reg_max, 1))
+            for x in ch
+        )
+
+        if self.legacy:
+            self.cv3 = nn.ModuleList(
+                nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, nc, 1))
+                for x in ch
+            )
+        else:
+            self.cv3 = nn.ModuleList(
+                nn.Sequential(
+                    nn.Sequential(DWConv(x,  x,  3), Conv(x,  c3, 1)),
+                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Conv2d(c3, nc, 1),
+                )
+                for x in ch
+            )
+
+        self.dfl = DFL(reg_max) if reg_max > 1 else nn.Identity()
+
+    def forward(self, x: list[torch.Tensor]) -> list[torch.Tensor] | torch.Tensor:
+        """
+        """
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
-        if self.training:  # Training path
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+
+        # Output per level: (B, 4*reg_max + nc, H_i, W_i)
+        if self.training or self.export:
             return x
 
-        # Inference path
-        shape = x[0].shape  # BCHW
-        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        shape = x[0].shape
         if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
             self.shape = shape
-        return x
+
+        x_cat        = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls     = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox         = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y            = torch.cat((dbox, cls.sigmoid()), dim=1)   # (B, 4+nc, 8400)
+
+        return self._topk(y)
+
+    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
+        return dist2bbox(bboxes, anchors, xywh=False, dim=1)
+
+    def _topk(self, y: torch.Tensor) -> torch.Tensor:
+        """
+        NMS-free top-k selection.
+        Input:  (B, 4+nc, total_anchors)
+        Output: (B, max_det, 6)  [x1, y1, x2, y2, confidence, class_index]
+        """
+        boxes            = y[:, :4, :]
+        scores           = y[:, 4:,  :]
+        conf, cls_idx    = scores.max(dim=1)
+        k                = min(self.max_det, conf.shape[1])
+        topk_conf, idx   = conf.topk(k, dim=1)
+        topk_boxes       = boxes.permute(0, 2, 1).gather(
+                               1, idx.unsqueeze(-1).expand(-1, -1, 4))
+        topk_cls         = cls_idx.gather(1, idx).float()
+        return torch.cat(
+            [topk_boxes, topk_conf.unsqueeze(-1), topk_cls.unsqueeze(-1)], dim=-1
+        )
+
+    def _topk_with_extra(
+        self, y: torch.Tensor, extra: torch.Tensor, extra_dim: int
+    ) -> torch.Tensor:
+        """topk applied to detections + an aligned extra tensor (mc / angle / kpts)."""
+        boxes            = y[:, :4, :]
+        scores           = y[:, 4:,  :]
+        conf, cls_idx    = scores.max(dim=1)
+        k                = min(self.max_det, conf.shape[1])
+        topk_conf, idx   = conf.topk(k, dim=1)
+        topk_boxes       = boxes.permute(0, 2, 1).gather(
+                               1, idx.unsqueeze(-1).expand(-1, -1, 4))
+        topk_cls         = cls_idx.gather(1, idx).float()
+        topk_extra       = extra.permute(0, 2, 1).gather(
+                               1, idx.unsqueeze(-1).expand(-1, -1, extra_dim))
+        return torch.cat(
+            [topk_boxes, topk_conf.unsqueeze(-1), topk_cls.unsqueeze(-1), topk_extra],
+            dim=-1,
+        )
 
     def bias_init(self):
-        """Initialize Detect() biases, WARNING: requires stride availability."""
-        m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
-        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
-            a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+        for a, b, s in zip(self.cv2, self.cv3, self.stride):
+            a[-1].bias.data[:] = 1.0
+            b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
 
-    def decode_bboxes(self, bboxes, anchors):
-        """Decode bounding boxes."""
-        return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
+# ============================================================================
+# Segment
+# ============================================================================
 
 class Segment(Detect):
-    """YOLOv8 Segment head for segmentation models."""
+    """YOLOv26 Segment head."""
 
-    def __init__(self, nc=80, nm=32, npr=256, ch=()):
-        """Initialize the YOLO model attributes such as the number of masks, prototypes, and the convolution layers."""
-        super().__init__(nc, ch)
-        self.nm = nm  # number of masks
-        self.npr = npr  # number of protos
-        self.proto = Proto(ch[0], self.npr, self.nm)  # protos
-        self.detect = Detect.forward
+    def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256,
+                 reg_max: int = 16, ch: tuple = ()):
+        super().__init__(nc, reg_max, ch)
+        self.nm    = nm
+        self.npr   = npr
+        self.proto = Proto(ch[0], npr, nm)
 
-        c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch)
+        c4 = max(ch[0] // 4, nm)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, nm, 1))
+            for x in ch
+        )
 
-    def forward(self, x):
-        """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
-        p = self.proto(x[0])  # mask protos
-        bs = p.shape[0]  # batch size
+    def forward(self, x: list[torch.Tensor]):
+        bs    = x[0].shape[0]
+        proto = self.proto(x[0])
+        mc    = torch.cat(
+            [self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
+        )
 
-        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)  # mask coefficients
-        x = self.detect(self, x)
-        if self.training:
-            return x, mc, p
-        return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
-
-
-class OBB(Detect):
-    """YOLOv8 OBB detection head for detection with rotation models."""
-
-    def __init__(self, nc=80, ne=1, ch=()):
-        """Initialize OBB with number of classes `nc` and layer channels `ch`."""
-        super().__init__(nc, ch)
-        self.ne = ne  # number of extra parameters
-
-        c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
-
-    def forward(self, x):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
-        # Process angle predictions
-        angle = [self.cv4[i](x[i]) for i in range(self.nl)]
-        
-        # Store angle for decode_bboxes method
-        self.angle = torch.cat([xi.view(x[0].shape[0], self.ne, -1) for xi in angle], 2)
-        
-        # Call parent class forward method properly
-        x_det = super().forward(x)
-        
-        if self.training:
-            return x_det, angle
-        
-        return x_det, angle
-
-    def decode_bboxes(self, bboxes, anchors):
-        """Decode rotated bounding boxes."""
-        return dist2rbox(bboxes, self.angle, anchors, dim=1)
-
-
-class Pose(Detect):
-    """YOLOv8 Pose head for keypoints models."""
-
-    def __init__(self, nc=80, kpt_shape=(17, 3), ch=()):
-        """Initialize YOLO network with default parameters and Convolutional Layers."""
-        super().__init__(nc, ch)
-        self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
-        self.nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
-        self.detect = Detect.forward
-
-        c4 = max(ch[0] // 4, self.nk)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
-
-    def forward(self, x):
-        """Perform forward pass through YOLO model and return predictions."""
-        bs = x[0].shape[0]  # batch size
-        kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)  # (bs, 17*3, h*w)
-        x = self.detect(self, x)
-        if self.training:
-            return x, kpt
-        pred_kpt = self.kpts_decode(bs, kpt)
-        return torch.cat([x, pred_kpt], 1) if self.export else (torch.cat([x[0], pred_kpt], 1), (x[1], kpt))
-
-    def kpts_decode(self, bs, kpts):
-        """Decodes keypoints."""
-        ndim = self.kpt_shape[1]
-        if self.export:  # required for TFLite export to avoid 'PLACEHOLDER_FOR_GREATER_OP_CODES' bug
-            y = kpts.view(bs, *self.kpt_shape, -1)
-            a = (y[:, :, :2] * 2.0 + (self.anchors - 0.5)) * self.strides
-            if ndim == 3:
-                a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
-            return a.view(bs, self.nk, -1)
-        else:
-            y = kpts.clone()
-            if ndim == 3:
-                y[:, 2::3] = y[:, 2::3].sigmoid()  # sigmoid (WARNING: inplace .sigmoid_() Apple MPS bug)
-            y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
-            y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
-            return y
-
-
-class Classify(nn.Module):
-    """YOLOv8 classification head, i.e. x(b,c1,20,20) to x(b,c2)."""
-
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1):
-        """Initializes YOLOv8 classification head with specified input and output channels, kernel size, stride,
-        padding, and groups.
-        """
-        super().__init__()
-        c_ = 1280  # efficientnet_b0 size
-        self.conv = Conv(c1, c_, k, s, p, g)
-        self.pool = nn.AdaptiveAvgPool2d(1)  # to x(b,c_,1,1)
-        self.drop = nn.Dropout(p=0.0, inplace=True)
-        self.linear = nn.Linear(c_, c2)  # to x(b,c2)
-
-    def forward(self, x):
-        """Performs a forward pass of the YOLO model on input image data."""
-        if isinstance(x, list):
-            x = torch.cat(x, 1)
-        x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
-        return x if self.training else x.softmax(1)
-
-
-class WorldDetect(Detect):
-    def __init__(self, nc=80, embed=512, with_bn=False, ch=()):
-        """Initialize YOLOv8 detection layer with nc classes and layer channels ch."""
-        super().__init__(nc, ch)
-        c3 = max(ch[0], min(self.nc, 100))
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
-        self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
-
-    def forward(self, x, text):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv4[i](self.cv3[i](x[i]), text)), 1)
-        if self.training:
-            return x
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
 
-        # Inference path
-        shape = x[0].shape  # BCHW
-        x_cat = torch.cat([xi.view(shape[0], self.nc + self.reg_max * 4, -1) for xi in x], 2)
+        if self.training or self.export:
+            # training → (x_list, mc, proto)
+            # export   → (x_list, mc, proto)  — DPU sees x_list + mc
+            return x, mc, proto
+
+        # normal inference
+        shape = x[0].shape
         if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
             self.shape = shape
 
-        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
-            box = x_cat[:, : self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4 :]
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+
+        return self._topk_with_extra(y, mc, self.nm), proto
+
+
+# ============================================================================
+# Segment26
+# ============================================================================
+
+class Segment26(Segment):
+    """YOLOv26 Segment26 head with Proto26 multi-scale mask generator."""
+
+    def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256,
+                 reg_max: int = 16, ch: tuple = ()):
+        super().__init__(nc, nm, npr, reg_max, ch)
+        self.proto = Proto26(ch, npr, nm, nc)
+
+    def forward(self, x: list[torch.Tensor]):
+        bs      = x[0].shape[0]
+        x_clone = [xi.clone() for xi in x]   # Proto26 needs original features
+        proto   = self.proto(x_clone)
+        mc      = torch.cat(
+            [self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
+        )
+
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+
+        if self.training or self.export:
+            return x, mc, proto
+
+        shape = x[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
+            self.shape = shape
+
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+
+        return self._topk_with_extra(y, mc, self.nm), proto
+
+# ============================================================================
+# OBB
+# ============================================================================
+ 
+class OBB(Detect):
+    """
+    YOLOv26 OBB head — angle = (sigmoid - 0.25) * π.
+ 
+    DPU output (export=True) — 6 tensors:
+      outputs[0..2] → box+cls per level        (B, 4*reg_max+nc, Hi, Wi)
+      outputs[3..5] → normalised angle per level (B, ne,           Hi, Wi)
+    """
+ 
+    def __init__(self, nc: int = 80, ne: int = 1,
+                 reg_max: int = 16, ch: tuple = ()):
+        super().__init__(nc, reg_max, ch)
+        self.ne = ne
+        c4 = max(ch[0] // 4, ne)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, ne, 1))
+            for x in ch
+        )
+ 
+    def forward(self, x: list[torch.Tensor]):
+        bs = x[0].shape[0]
+ 
+        # Per-level angle in spatial form (B, ne, Hi, Wi) — gives 3 separate DPU outputs
+        angle_per_level = [self.cv4[i](x[i]) for i in range(self.nl)]
+ 
+        # Concatenated normalised angle — used internally by decode_bboxes
+        angle_cat  = torch.cat(
+            [a.view(bs, self.ne, -1) for a in angle_per_level], dim=2
+        )
+        self.angle = (angle_cat.sigmoid() - 0.25) * math.pi
+ 
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+ 
+        if self.training or self.export:
+            # 6 outputs: [box+cls_l0, box+cls_l1, box+cls_l2,
+            #              angle_l0,   angle_l1,   angle_l2]  ← normalised
+            angle_per_level = [
+                (a.sigmoid() - 0.25) * math.pi for a in angle_per_level
+            ]
+            return x + angle_per_level
+ 
+        shape = x[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
+            self.shape = shape
+ 
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+ 
+        return self._topk_with_extra(y, self.angle, self.ne)
+ 
+    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
+        return dist2rbox(bboxes, self.angle, anchors, dim=1)
+ 
+ 
+# ============================================================================
+# OBB26
+# ============================================================================
+ 
+class OBB26(OBB):
+    """
+    YOLOv26 OBB26 head — raw angle logits (no sigmoid in exported graph).
+ 
+    DPU output (export=True) — 6 tensors:
+      outputs[0..2] → box+cls per level    (B, 4*reg_max+nc, Hi, Wi)
+      outputs[3..5] → raw angle per level  (B, ne,           Hi, Wi)  ← no sigmoid
+    """
+ 
+    def forward(self, x: list[torch.Tensor]):
+        bs = x[0].shape[0]
+ 
+        # Per-level raw logits in spatial form — no sigmoid baked in
+        angle_per_level = [self.cv4[i](x[i]) for i in range(self.nl)]
+ 
+        # Concatenated + normalised angle for decode_bboxes only (not exported)
+        angle_cat  = torch.cat(
+            [a.view(bs, self.ne, -1) for a in angle_per_level], dim=2
+        )
+        self.angle = (angle_cat.sigmoid() - 0.25) * math.pi
+ 
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+ 
+        if self.training or self.export:
+            # 6 outputs: [box+cls_l0, box+cls_l1, box+cls_l2,
+            #              angle_raw_l0, angle_raw_l1, angle_raw_l2]  ← raw logits
+            return x + angle_per_level
+ 
+        shape = x[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
+            self.shape = shape
+ 
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+ 
+        return self._topk_with_extra(y, self.angle, self.ne)
+ 
+# ============================================================================
+# Pose
+# ============================================================================
+
+class Pose(Detect):
+    """YOLOv26 Pose head."""
+
+    def __init__(self, nc: int = 80, kpt_shape: tuple = (17, 3),
+                 reg_max: int = 16, ch: tuple = ()):
+        super().__init__(nc, reg_max, ch)
+        self.kpt_shape = kpt_shape
+        self.nk        = kpt_shape[0] * kpt_shape[1]
+
+        c4 = max(ch[0] // 4, self.nk)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1))
+            for x in ch
+        )
+
+    def forward(self, x: list[torch.Tensor]):
+        bs  = x[0].shape[0]
+        kpt = torch.cat(
+            [self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], dim=-1
+        )
+
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+
+        if self.training or self.export:
+            return x, kpt
+
+        shape = x[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
+            self.shape = shape
+
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+
+        kpt_dec = self.kpts_decode(bs, kpt)
+        return self._topk_with_extra(y, kpt_dec, self.nk)
+
+    def kpts_decode(self, bs: int, kpts: torch.Tensor) -> torch.Tensor:
+        ndim = self.kpt_shape[1]
+        y = kpts.clone()
+        if ndim == 3:
+            y[:, 2::3] = y[:, 2::3].sigmoid()
+        y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
+        y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
+        return y
+
+
+# ============================================================================
+# Pose26  (RealNVP + sigma removed)
+# ============================================================================
+
+class Pose26(Pose):
+    """
+    YOLOv26 Pose26 head.
+    - RealNVP removed.
+    - Sigma branch removed.
+    - Anchor convention: coord = (raw + anchor) * stride.
+    """
+
+    def __init__(self, nc: int = 80, kpt_shape: tuple = (17, 3),
+                 reg_max: int = 16, ch: tuple = ()):
+        super().__init__(nc, kpt_shape, reg_max, ch)
+
+        c4 = max(ch[0] // 4, kpt_shape[0] * (kpt_shape[1] + 2))
+        self.cv4      = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3)) for x in ch
+        )
+        self.cv4_kpts = nn.ModuleList(nn.Conv2d(c4, self.nk, 1) for _ in ch)
+
+    def forward(self, x: list[torch.Tensor]):
+        bs       = x[0].shape[0]
+        features = [self.cv4[i](x[i]) for i in range(self.nl)]
+        kpt      = torch.cat(
+            [self.cv4_kpts[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)],
+            dim=-1,
+        )
+
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+
+        if self.training or self.export:
+            return x, kpt
+
+        shape = x[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (
+                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+            )
+            self.shape = shape
+
+        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
+        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+
+        kpt_dec = self.kpts_decode(bs, kpt)
+        return self._topk_with_extra(y, kpt_dec, self.nk)
+
+    def kpts_decode(self, bs: int, kpts: torch.Tensor) -> torch.Tensor:
+        """Pose26: coord = (raw + anchor) * stride."""
+        ndim = self.kpt_shape[1]
+        y = kpts.clone()
+        if ndim == 3:
+            y[:, 2::ndim] = y[:, 2::ndim].sigmoid()
+        y[:, 0::ndim] = (y[:, 0::ndim] + self.anchors[0]) * self.strides
+        y[:, 1::ndim] = (y[:, 1::ndim] + self.anchors[1]) * self.strides
+        return y
+
+
+# ============================================================================
+# Classify
+# ============================================================================
+
+class Classify(nn.Module):
+    """Standard classification head — DPU compatible."""
+
+    export = False
+
+    def __init__(self, c1: int, c2: int, k: int = 1, s: int = 1,
+                 p: int | None = None, g: int = 1):
+        super().__init__()
+        c_ = 1280
+        self.conv   = Conv(c1, c_, k, s, p, g)
+        self.pool   = nn.AdaptiveAvgPool2d(1)
+        self.drop   = nn.Dropout(p=0.0, inplace=True)
+        self.linear = nn.Linear(c_, c2)
+
+    def forward(self, x):
+        if isinstance(x, list):
+            x = torch.cat(x, dim=1)
+        x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+        return x if self.training else x.softmax(1)
+    
+    
+class LRPCHead(nn.Module):
+    """Lightweight Region Proposal and Classification Head for efficient object detection.
+
+    This head combines region proposal filtering with classification to enable efficient detection with dynamic
+    vocabulary support.
+
+    Attributes:
+        vocab (nn.Module): Vocabulary/classification layer.
+        pf (nn.Module): Proposal filter module.
+        loc (nn.Module): Localization module.
+        enabled (bool): Whether the head is enabled.
+
+    Methods:
+        conv2linear: Convert a 1x1 convolutional layer to a linear layer.
+        forward: Process classification and localization features to generate detection proposals.
+
+    Examples:
+        Create an LRPC head
+        >>> vocab = nn.Conv2d(256, 80, 1)
+        >>> pf = nn.Conv2d(256, 1, 1)
+        >>> loc = nn.Conv2d(256, 4, 1)
+        >>> head = LRPCHead(vocab, pf, loc, enabled=True)
+    """
+
+    def __init__(self, vocab: nn.Module, pf: nn.Module, loc: nn.Module, enabled: bool = True):
+        """Initialize LRPCHead with vocabulary, proposal filter, and localization components.
+
+        Args:
+            vocab (nn.Module): Vocabulary/classification module.
+            pf (nn.Module): Proposal filter module.
+            loc (nn.Module): Localization module.
+            enabled (bool): Whether to enable the head functionality.
+        """
+        super().__init__()
+        self.vocab = self.conv2linear(vocab) if enabled else vocab
+        self.pf = pf
+        self.loc = loc
+        self.enabled = enabled
+
+    @staticmethod
+    def conv2linear(conv: nn.Conv2d) -> nn.Linear:
+        """Convert a 1x1 convolutional layer to a linear layer."""
+        assert isinstance(conv, nn.Conv2d) and conv.kernel_size == (1, 1)
+        linear = nn.Linear(conv.in_channels, conv.out_channels)
+        linear.weight.data = conv.weight.view(conv.out_channels, -1).data
+        linear.bias.data = conv.bias.data
+        return linear
+
+    def forward(self, cls_feat: torch.Tensor, loc_feat: torch.Tensor, conf: float) -> tuple[tuple, torch.Tensor]:
+        """Process classification and localization features to generate detection proposals."""
+        if self.enabled:
+            pf_score = self.pf(cls_feat)[0, 0].flatten(0)
+            mask = pf_score.sigmoid() > conf
+            cls_feat = cls_feat.flatten(2).transpose(-1, -2)
+            cls_feat = self.vocab(cls_feat[:, mask] if conf else cls_feat * mask.unsqueeze(-1).int())
+            return self.loc(loc_feat), cls_feat.transpose(-1, -2), mask
         else:
-            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
-
-        if self.export and self.format in {"tflite", "edgetpu"}:
-            # Precompute normalization factor to increase numerical stability
-            # See https://github.com/ultralytics/ultralytics/issues/7371
-            grid_h = shape[2]
-            grid_w = shape[3]
-            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
-            norm = self.strides / (self.stride[0] * grid_size)
-            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
-        else:
-            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-
-        y = torch.cat((dbox, cls.sigmoid()), 1)
-        return y if self.export else (y, x)
-
-    def bias_init(self):
-        """Initialize Detect() biases, WARNING: requires stride availability."""
-        m = self  # self.model[-1]  # Detect() module
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
-        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
-        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
-            a[-1].bias.data[:] = 1.0  # box
-            # b[-1].bias.data[:] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
-
+            cls_feat = self.vocab(cls_feat)
+            loc_feat = self.loc(loc_feat)
+            return (
+                loc_feat,
+                cls_feat.flatten(2),
+                torch.ones(cls_feat.shape[2] * cls_feat.shape[3], device=cls_feat.device, dtype=torch.bool),
+            )
 
 class RTDETRDecoder(nn.Module):
-    """
-    Real-Time Deformable Transformer Decoder (RTDETRDecoder) module for object detection.
+    """Real-Time Deformable Transformer Decoder (RTDETRDecoder) module for object detection.
 
     This decoder module utilizes Transformer architecture along with deformable convolutions to predict bounding boxes
     and class labels for objects in an image. It integrates features from multiple layers and runs through a series of
     Transformer decoder layers to output the final predictions.
+
+    Attributes:
+        export (bool): Export mode flag.
+        hidden_dim (int): Dimension of hidden layers.
+        nhead (int): Number of heads in multi-head attention.
+        nl (int): Number of feature levels.
+        nc (int): Number of classes.
+        num_queries (int): Number of query points.
+        num_decoder_layers (int): Number of decoder layers.
+        input_proj (nn.ModuleList): Input projection layers for backbone features.
+        decoder (DeformableTransformerDecoder): Transformer decoder module.
+        denoising_class_embed (nn.Embedding): Class embeddings for denoising.
+        num_denoising (int): Number of denoising queries.
+        label_noise_ratio (float): Label noise ratio for training.
+        box_noise_scale (float): Box noise scale for training.
+        learnt_init_query (bool): Whether to learn initial query embeddings.
+        tgt_embed (nn.Embedding): Target embeddings for queries.
+        query_pos_head (MLP): Query position head.
+        enc_output (nn.Sequential): Encoder output layers.
+        enc_score_head (nn.Linear): Encoder score prediction head.
+        enc_bbox_head (MLP): Encoder bbox prediction head.
+        dec_score_head (nn.ModuleList): Decoder score prediction heads.
+        dec_bbox_head (nn.ModuleList): Decoder bbox prediction heads.
+
+    Methods:
+        forward: Run forward pass and return bounding box and classification scores.
+
+    Examples:
+        Create an RTDETRDecoder
+        >>> decoder = RTDETRDecoder(nc=80, ch=(512, 1024, 2048), hd=256, nq=300)
+        >>> x = [torch.randn(1, 512, 64, 64), torch.randn(1, 1024, 32, 32), torch.randn(1, 2048, 16, 16)]
+        >>> outputs = decoder(x)
     """
 
     export = False  # export mode
+    shapes = []
+    anchors = torch.empty(0)
+    valid_mask = torch.empty(0)
+    dynamic = False
 
     def __init__(
         self,
-        nc=80,
-        ch=(512, 1024, 2048),
-        hd=256,  # hidden dim
-        nq=300,  # num queries
-        ndp=4,  # num decoder points
-        nh=8,  # num head
-        ndl=6,  # num decoder layers
-        d_ffn=1024,  # dim of feedforward
-        dropout=0.0,
-        act=nn.ReLU(),
-        eval_idx=-1,
+        nc: int = 80,
+        ch: tuple = (512, 1024, 2048),
+        hd: int = 256,  # hidden dim
+        nq: int = 300,  # num queries
+        ndp: int = 4,  # num decoder points
+        nh: int = 8,  # num head
+        ndl: int = 6,  # num decoder layers
+        d_ffn: int = 1024,  # dim of feedforward
+        dropout: float = 0.0,
+        act: nn.Module = nn.ReLU(),
+        eval_idx: int = -1,
         # Training args
-        nd=100,  # num denoising
-        label_noise_ratio=0.5,
-        box_noise_scale=1.0,
-        learnt_init_query=False,
+        nd: int = 100,  # num denoising
+        label_noise_ratio: float = 0.5,
+        box_noise_scale: float = 1.0,
+        learnt_init_query: bool = False,
     ):
-        """
-        Initializes the RTDETRDecoder module with the given parameters.
+        """Initialize the RTDETRDecoder module with the given parameters.
 
         Args:
-            nc (int): Number of classes. Default is 80.
-            ch (tuple): Channels in the backbone feature maps. Default is (512, 1024, 2048).
-            hd (int): Dimension of hidden layers. Default is 256.
-            nq (int): Number of query points. Default is 300.
-            ndp (int): Number of decoder points. Default is 4.
-            nh (int): Number of heads in multi-head attention. Default is 8.
-            ndl (int): Number of decoder layers. Default is 6.
-            d_ffn (int): Dimension of the feed-forward networks. Default is 1024.
-            dropout (float): Dropout rate. Default is 0.
-            act (nn.Module): Activation function. Default is nn.ReLU.
-            eval_idx (int): Evaluation index. Default is -1.
-            nd (int): Number of denoising. Default is 100.
-            label_noise_ratio (float): Label noise ratio. Default is 0.5.
-            box_noise_scale (float): Box noise scale. Default is 1.0.
-            learnt_init_query (bool): Whether to learn initial query embeddings. Default is False.
+            nc (int): Number of classes.
+            ch (tuple): Channels in the backbone feature maps.
+            hd (int): Dimension of hidden layers.
+            nq (int): Number of query points.
+            ndp (int): Number of decoder points.
+            nh (int): Number of heads in multi-head attention.
+            ndl (int): Number of decoder layers.
+            d_ffn (int): Dimension of the feed-forward networks.
+            dropout (float): Dropout rate.
+            act (nn.Module): Activation function.
+            eval_idx (int): Evaluation index.
+            nd (int): Number of denoising.
+            label_noise_ratio (float): Label noise ratio.
+            box_noise_scale (float): Box noise scale.
+            learnt_init_query (bool): Whether to learn initial query embeddings.
         """
         super().__init__()
         self.hidden_dim = hd
@@ -331,8 +676,18 @@ class RTDETRDecoder(nn.Module):
 
         self._reset_parameters()
 
-    def forward(self, x, batch=None):
-        """Runs the forward pass of the module, returning bounding box and classification scores for the input."""
+    def forward(self, x: list[torch.Tensor], batch: dict | None = None) -> tuple | torch.Tensor:
+        """Run the forward pass of the module, returning bounding box and classification scores for the input.
+
+        Args:
+            x (list[torch.Tensor]): List of feature maps from the backbone.
+            batch (dict, optional): Batch information for training.
+
+        Returns:
+            outputs (tuple | torch.Tensor): During training, returns a tuple of bounding boxes, scores, and other
+                metadata. During inference, returns a tensor of shape (bs, 300, 4+nc) containing bounding boxes and
+                class scores.
+        """
         from ultralytics.models.utils.ops import get_cdn_group
 
         # Input projection and embedding
@@ -370,13 +725,32 @@ class RTDETRDecoder(nn.Module):
         y = torch.cat((dec_bboxes.squeeze(0), dec_scores.squeeze(0).sigmoid()), -1)
         return y if self.export else (y, x)
 
-    def _generate_anchors(self, shapes, grid_size=0.05, dtype=torch.float32, device="cpu", eps=1e-2):
-        """Generates anchor bounding boxes for given shapes with specific grid size and validates them."""
+    @staticmethod
+    def _generate_anchors(
+        shapes: list[list[int]],
+        grid_size: float = 0.05,
+        dtype: torch.dtype = torch.float32,
+        device: str = "cpu",
+        eps: float = 1e-2,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate anchor bounding boxes for given shapes with specific grid size and validate them.
+
+        Args:
+            shapes (list): List of feature map shapes.
+            grid_size (float, optional): Base size of grid cells.
+            dtype (torch.dtype, optional): Data type for tensors.
+            device (str, optional): Device to create tensors on.
+            eps (float, optional): Small value for numerical stability.
+
+        Returns:
+            anchors (torch.Tensor): Generated anchor boxes.
+            valid_mask (torch.Tensor): Valid mask for anchors.
+        """
         anchors = []
         for i, (h, w) in enumerate(shapes):
             sy = torch.arange(end=h, dtype=dtype, device=device)
             sx = torch.arange(end=w, dtype=dtype, device=device)
-            grid_y, grid_x = torch.meshgrid(sy, sx, indexing="ij") if TORCH_1_10 else torch.meshgrid(sy, sx)
+            grid_y, grid_x = torch.meshgrid(sy, sx, indexing="ij") if TORCH_1_11 else torch.meshgrid(sy, sx)
             grid_xy = torch.stack([grid_x, grid_y], -1)  # (h, w, 2)
 
             valid_WH = torch.tensor([w, h], dtype=dtype, device=device)
@@ -390,8 +764,16 @@ class RTDETRDecoder(nn.Module):
         anchors = anchors.masked_fill(~valid_mask, float("inf"))
         return anchors, valid_mask
 
-    def _get_encoder_input(self, x):
-        """Processes and returns encoder inputs by getting projection features from input and concatenating them."""
+    def _get_encoder_input(self, x: list[torch.Tensor]) -> tuple[torch.Tensor, list[list[int]]]:
+        """Process and return encoder inputs by getting projection features from input and concatenating them.
+
+        Args:
+            x (list[torch.Tensor]): List of feature maps from the backbone.
+
+        Returns:
+            feats (torch.Tensor): Processed features.
+            shapes (list): List of feature map shapes.
+        """
         # Get projection features
         x = [self.input_proj[i](feat) for i, feat in enumerate(x)]
         # Get encoder inputs
@@ -408,25 +790,46 @@ class RTDETRDecoder(nn.Module):
         feats = torch.cat(feats, 1)
         return feats, shapes
 
-    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None):
-        """Generates and prepares the input required for the decoder from the provided features and shapes."""
-        bs = feats.shape[0]
-        # Prepare input for decoder
-        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
-        features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
+    def _get_decoder_input(
+        self,
+        feats: torch.Tensor,
+        shapes: list[list[int]],
+        dn_embed: torch.Tensor | None = None,
+        dn_bbox: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Generate and prepare the input required for the decoder from the provided features and shapes.
 
+        Args:
+            feats (torch.Tensor): Processed features from encoder.
+            shapes (list): List of feature map shapes.
+            dn_embed (torch.Tensor, optional): Denoising embeddings.
+            dn_bbox (torch.Tensor, optional): Denoising bounding boxes.
+
+        Returns:
+            embeddings (torch.Tensor): Query embeddings for decoder.
+            refer_bbox (torch.Tensor): Reference bounding boxes.
+            enc_bboxes (torch.Tensor): Encoded bounding boxes.
+            enc_scores (torch.Tensor): Encoded scores.
+        """
+        bs = feats.shape[0]
+        if self.dynamic or self.shapes != shapes:
+            self.anchors, self.valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+            self.shapes = shapes
+
+        # Prepare input for decoder
+        features = self.enc_output(self.valid_mask * feats)  # bs, h*w, 256
         enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
 
         # Query selection
-        # (bs, num_queries)
+        # (bs*num_queries,)
         topk_ind = torch.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
-        # (bs, num_queries)
+        # (bs*num_queries,)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
 
         # (bs, num_queries, 256)
         top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
         # (bs, num_queries, 4)
-        top_k_anchors = anchors[:, topk_ind].view(bs, self.num_queries, -1)
+        top_k_anchors = self.anchors[:, topk_ind].view(bs, self.num_queries, -1)
 
         # Dynamic anchors + static content
         refer_bbox = self.enc_bbox_head(top_k_features) + top_k_anchors
@@ -446,9 +849,8 @@ class RTDETRDecoder(nn.Module):
 
         return embeddings, refer_bbox, enc_bboxes, enc_scores
 
-    # TODO
     def _reset_parameters(self):
-        """Initializes or resets the parameters of the model's various components with predefined weights and biases."""
+        """Initialize or reset the parameters of the model's various components with predefined weights and biases."""
         # Class and bbox head init
         bias_cls = bias_init_with_prob(0.01) / 80 * self.nc
         # NOTE: the weight initialization in `linear_init` would cause NaN when training with custom datasets.
@@ -470,3 +872,572 @@ class RTDETRDecoder(nn.Module):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for layer in self.input_proj:
             xavier_uniform_(layer[0].weight)
+
+
+class v10Detect(Detect):
+    """v10 Detection head from https://arxiv.org/pdf/2405.14458.
+
+    This class implements the YOLOv10 detection head with dual-assignment training and consistent dual predictions for
+    improved efficiency and performance.
+
+    Attributes:
+        end2end (bool): End-to-end detection mode.
+        max_det (int): Maximum number of detections.
+        cv3 (nn.ModuleList): Light classification head layers.
+        one2one_cv3 (nn.ModuleList): One-to-one classification head layers.
+
+    Methods:
+        __init__: Initialize the v10Detect object with specified number of classes and input channels.
+        forward: Perform forward pass of the v10Detect module.
+        bias_init: Initialize biases of the Detect module.
+        fuse: Remove the one2many head for inference optimization.
+
+    Examples:
+        Create a v10Detect head
+        >>> v10_detect = v10Detect(nc=80, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> outputs = v10_detect(x)
+    """
+
+    end2end = True
+
+    def __init__(self, nc: int = 80, ch: tuple = ()):
+        """Initialize the v10Detect object with the specified number of classes and input channels.
+
+        Args:
+            nc (int): Number of classes.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, end2end=True, ch=ch)
+        c3 = max(ch[0], min(self.nc, 100))  # channels
+        # Light cls head
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)),
+                nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)),
+                nn.Conv2d(c3, self.nc, 1),
+            )
+            for x in ch
+        )
+        self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+    def fuse(self):
+        """Remove the one2many head for inference optimization."""
+        self.cv2 = self.cv3 = None
+        
+
+class WorldDetect(Detect):
+    """Head for integrating YOLO detection models with semantic understanding from text embeddings.
+
+    This class extends the standard Detect head to incorporate text embeddings for enhanced semantic understanding in
+    object detection tasks.
+
+    Attributes:
+        cv3 (nn.ModuleList): Convolution layers for embedding features.
+        cv4 (nn.ModuleList): Contrastive head layers for text-vision alignment.
+
+    Methods:
+        forward: Concatenate and return predicted bounding boxes and class probabilities.
+        bias_init: Initialize detection head biases.
+
+    Examples:
+        Create a WorldDetect head
+        >>> world_detect = WorldDetect(nc=80, embed=512, with_bn=False, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> text = torch.randn(1, 80, 512)
+        >>> outputs = world_detect(x, text)
+    """
+
+    def __init__(
+        self,
+        nc: int = 80,
+        embed: int = 512,
+        with_bn: bool = False,
+        reg_max: int = 16,
+        end2end: bool = False,
+        ch: tuple = (),
+    ):
+        """Initialize YOLO detection layer with nc classes and layer channels ch.
+
+        Args:
+            nc (int): Number of classes.
+            embed (int): Embedding dimension.
+            with_bn (bool): Whether to use batch normalization in contrastive head.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        c3 = max(ch[0], min(self.nc, 100))
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
+
+    def forward(self, x: list[torch.Tensor], text: torch.Tensor) -> dict[str, torch.Tensor] | tuple:
+        """Concatenate and return predicted bounding boxes and class probabilities."""
+        feats = [xi.clone() for xi in x]  # save original features for anchor generation
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv4[i](self.cv3[i](x[i]), text)), 1)
+        self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts
+        bs = x[0].shape[0]
+        x_cat = torch.cat([xi.view(bs, self.no, -1) for xi in x], 2)
+        boxes, scores = x_cat.split((self.reg_max * 4, self.nc), 1)
+        preds = dict(boxes=boxes, scores=scores, feats=feats)
+        if self.training:
+            return preds
+        y = self._inference(preds)
+        return y if self.export else (y, preds)
+
+    def bias_init(self):
+        """Initialize Detect() biases, WARNING: requires stride availability."""
+        m = self  # self.model[-1]  # Detect() module
+        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
+        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
+            a[-1].bias.data[:] = 1.0  # box
+            # b[-1].bias.data[:] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
+
+
+class YOLOEDetect(Detect):
+    """Head for integrating YOLO detection models with semantic understanding from text embeddings.
+
+    This class extends the standard Detect head to support text-guided detection with enhanced semantic understanding
+    through text embeddings and visual prompt embeddings.
+
+    Attributes:
+        is_fused (bool): Whether the model is fused for inference.
+        cv3 (nn.ModuleList): Convolution layers for embedding features.
+        cv4 (nn.ModuleList): Contrastive head layers for text-vision alignment.
+        reprta (Residual): Residual block for text prompt embeddings.
+        savpe (SAVPE): Spatial-aware visual prompt embeddings module.
+        embed (int): Embedding dimension.
+
+    Methods:
+        fuse: Fuse text features with model weights for efficient inference.
+        get_tpe: Get text prompt embeddings with normalization.
+        get_vpe: Get visual prompt embeddings with spatial awareness.
+        forward_lrpc: Process features with fused text embeddings for prompt-free model.
+        forward: Process features with class prompt embeddings to generate detections.
+        bias_init: Initialize biases for detection heads.
+
+    Examples:
+        Create a YOLOEDetect head
+        >>> yoloe_detect = YOLOEDetect(nc=80, embed=512, with_bn=True, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> cls_pe = torch.randn(1, 80, 512)
+        >>> outputs = yoloe_detect(x, cls_pe)
+    """
+
+    is_fused = False
+
+    def __init__(
+        self, nc: int = 80, embed: int = 512, with_bn: bool = False, reg_max=16, end2end=False, ch: tuple = ()
+    ):
+        """Initialize YOLO detection layer with nc classes and layer channels ch.
+
+        Args:
+            nc (int): Number of classes.
+            embed (int): Embedding dimension.
+            with_bn (bool): Whether to use batch normalization in contrastive head.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, reg_max, end2end, ch)
+        c3 = max(ch[0], min(self.nc, 100))
+        assert c3 <= embed
+        assert with_bn
+        self.cv3 = (
+            nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
+            if self.legacy
+            else nn.ModuleList(
+                nn.Sequential(
+                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Conv2d(c3, embed, 1),
+                )
+                for x in ch
+            )
+        )
+        self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
+        if end2end:
+            self.one2one_cv3 = copy.deepcopy(self.cv3)  # overwrite with new cv3
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
+
+        self.reprta = Residual(SwiGLUFFN(embed, embed))
+        self.savpe = SAVPE(ch, c3, embed)
+        self.embed = embed
+
+    @smart_inference_mode()
+    def fuse(self, txt_feats: torch.Tensor = None):
+        """Fuse text features with model weights for efficient inference."""
+        if txt_feats is None:  # means eliminate one2many branch
+            self.cv2 = self.cv3 = self.cv4 = None
+            return
+        if self.is_fused:
+            return
+
+        assert not self.training
+        txt_feats = txt_feats.to(torch.float32).squeeze(0)
+        self._fuse_tp(txt_feats, self.cv3, self.cv4)
+        if self.end2end:
+            self._fuse_tp(txt_feats, self.one2one_cv3, self.one2one_cv4)
+        del self.reprta
+        self.reprta = nn.Identity()
+        self.is_fused = True
+
+    def _fuse_tp(self, txt_feats: torch.Tensor, cls_head: torch.nn.Module, bn_head: torch.nn.Module) -> None:
+        """Fuse text prompt embeddings with model weights for efficient inference."""
+        for cls_h, bn_h in zip(cls_head, bn_head):
+            assert isinstance(cls_h, nn.Sequential)
+            assert isinstance(bn_h, BNContrastiveHead)
+            conv = cls_h[-1]
+            assert isinstance(conv, nn.Conv2d)
+            logit_scale = bn_h.logit_scale
+            bias = bn_h.bias
+            norm = bn_h.norm
+
+            t = txt_feats * logit_scale.exp()
+            conv: nn.Conv2d = fuse_conv_and_bn(conv, norm)
+
+            w = conv.weight.data.squeeze(-1).squeeze(-1)
+            b = conv.bias.data
+
+            w = t @ w
+            b1 = (t @ b.reshape(-1).unsqueeze(-1)).squeeze(-1)
+            b2 = torch.ones_like(b1) * bias
+
+            conv = (
+                nn.Conv2d(
+                    conv.in_channels,
+                    w.shape[0],
+                    kernel_size=1,
+                )
+                .requires_grad_(False)
+                .to(conv.weight.device)
+            )
+
+            conv.weight.data.copy_(w.unsqueeze(-1).unsqueeze(-1))
+            conv.bias.data.copy_(b1 + b2)
+            cls_h[-1] = conv
+
+            bn_h.fuse()
+
+    def get_tpe(self, tpe: torch.Tensor | None) -> torch.Tensor | None:
+        """Get text prompt embeddings with normalization."""
+        return None if tpe is None else F.normalize(self.reprta(tpe), dim=-1, p=2)
+
+    def get_vpe(self, x: list[torch.Tensor], vpe: torch.Tensor) -> torch.Tensor:
+        """Get visual prompt embeddings with spatial awareness."""
+        if vpe.shape[1] == 0:  # no visual prompt embeddings
+            return torch.zeros(x[0].shape[0], 0, self.embed, device=x[0].device)
+        if vpe.ndim == 4:  # (B, N, H, W)
+            vpe = self.savpe(x, vpe)
+        assert vpe.ndim == 3  # (B, N, D)
+        return vpe
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor | tuple:
+        """Process features with class prompt embeddings to generate detections."""
+        if hasattr(self, "lrpc"):  # for prompt-free inference
+            return self.forward_lrpc(x[:3])
+        return super().forward(x)
+
+    def forward_lrpc(self, x: list[torch.Tensor]) -> torch.Tensor | tuple:
+        """Process features with fused text embeddings to generate detections for prompt-free model."""
+        boxes, scores, index = [], [], []
+        bs = x[0].shape[0]
+        cv2 = self.cv2 if not self.end2end else self.one2one_cv2
+        cv3 = self.cv3 if not self.end2end else self.one2one_cv3
+        for i in range(self.nl):
+            cls_feat = cv3[i](x[i])
+            loc_feat = cv2[i](x[i])
+            assert isinstance(self.lrpc[i], LRPCHead)
+            box, score, idx = self.lrpc[i](
+                cls_feat,
+                loc_feat,
+                0 if self.export and not self.dynamic else getattr(self, "conf", 0.001),
+            )
+            boxes.append(box.view(bs, self.reg_max * 4, -1))
+            scores.append(score)
+            index.append(idx)
+        preds = dict(boxes=torch.cat(boxes, 2), scores=torch.cat(scores, 2), feats=x, index=torch.cat(index))
+        y = self._inference(preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
+
+    def _get_decode_boxes(self, x):
+        """Decode predicted bounding boxes for inference."""
+        dbox = super()._get_decode_boxes(x)
+        if hasattr(self, "lrpc"):
+            dbox = dbox if self.export and not self.dynamic else dbox[..., x["index"]]
+        return dbox
+
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components, here for v3/v5/v8/v9/v11 backward compatibility."""
+        return dict(box_head=self.cv2, cls_head=self.cv3, contrastive_head=self.cv4)
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, contrastive_head=self.one2one_cv4)
+
+    def forward_head(self, x, box_head, cls_head, contrastive_head):
+        """Concatenates and returns predicted bounding boxes, class probabilities, and contrastive scores."""
+        assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
+        if box_head is None or cls_head is None:  # for fused inference
+            return dict()
+        bs = x[0].shape[0]  # batch size
+        boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+        self.nc = x[-1].shape[1]
+        scores = torch.cat(
+            [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+        )
+        self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts
+        return dict(boxes=boxes, scores=scores, feats=x[:3])
+
+    def bias_init(self):
+        """Initialize Detect() biases, WARNING: requires stride availability."""
+        for i, (a, b, c) in enumerate(
+            zip(self.one2many["box_head"], self.one2many["cls_head"], self.one2many["contrastive_head"])
+        ):
+            a[-1].bias.data[:] = 2.0  # box
+            b[-1].bias.data[:] = 0.0
+            c.bias.data[:] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+        if self.end2end:
+            for i, (a, b, c) in enumerate(
+                zip(self.one2one["box_head"], self.one2one["cls_head"], self.one2one["contrastive_head"])
+            ):
+                a[-1].bias.data[:] = 2.0  # box
+                b[-1].bias.data[:] = 0.0
+                c.bias.data[:] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+
+
+class YOLOESegment(YOLOEDetect):
+    """YOLO segmentation head with text embedding capabilities.
+
+    This class extends YOLOEDetect to include mask prediction capabilities for instance segmentation tasks with
+    text-guided semantic understanding.
+
+    Attributes:
+        nm (int): Number of masks.
+        npr (int): Number of protos.
+        proto (Proto): Prototype generation module.
+        cv5 (nn.ModuleList): Convolution layers for mask coefficients.
+
+    Methods:
+        forward: Return model outputs and mask coefficients.
+
+    Examples:
+        Create a YOLOESegment head
+        >>> yoloe_segment = YOLOESegment(nc=80, nm=32, npr=256, embed=512, with_bn=True, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> text = torch.randn(1, 80, 512)
+        >>> outputs = yoloe_segment(x, text)
+    """
+
+    def __init__(
+        self,
+        nc: int = 80,
+        nm: int = 32,
+        npr: int = 256,
+        embed: int = 512,
+        with_bn: bool = False,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize YOLOESegment with class count, mask parameters, and embedding dimensions.
+
+        Args:
+            nc (int): Number of classes.
+            nm (int): Number of masks.
+            npr (int): Number of protos.
+            embed (int): Embedding dimension.
+            with_bn (bool): Whether to use batch normalization in contrastive head.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, embed, with_bn, reg_max, end2end, ch)
+        self.nm = nm
+        self.npr = npr
+        self.proto = Proto(ch[0], self.npr, self.nm)
+
+        c5 = max(ch[0] // 4, self.nm)
+        self.cv5 = nn.ModuleList(nn.Sequential(Conv(x, c5, 3), Conv(c5, c5, 3), nn.Conv2d(c5, self.nm, 1)) for x in ch)
+        if end2end:
+            self.one2one_cv5 = copy.deepcopy(self.cv5)
+
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components, here for v3/v5/v8/v9/v11 backward compatibility."""
+        return dict(box_head=self.cv2, cls_head=self.cv3, mask_head=self.cv5, contrastive_head=self.cv4)
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components."""
+        return dict(
+            box_head=self.one2one_cv2,
+            cls_head=self.one2one_cv3,
+            mask_head=self.one2one_cv5,
+            contrastive_head=self.one2one_cv4,
+        )
+
+    def forward_lrpc(self, x: list[torch.Tensor]) -> torch.Tensor | tuple:
+        """Process features with fused text embeddings to generate detections for prompt-free model."""
+        boxes, scores, index = [], [], []
+        bs = x[0].shape[0]
+        cv2 = self.cv2 if not self.end2end else self.one2one_cv2
+        cv3 = self.cv3 if not self.end2end else self.one2one_cv3
+        cv5 = self.cv5 if not self.end2end else self.one2one_cv5
+        for i in range(self.nl):
+            cls_feat = cv3[i](x[i])
+            loc_feat = cv2[i](x[i])
+            assert isinstance(self.lrpc[i], LRPCHead)
+            box, score, idx = self.lrpc[i](
+                cls_feat,
+                loc_feat,
+                0 if self.export and not self.dynamic else getattr(self, "conf", 0.001),
+            )
+            boxes.append(box.view(bs, self.reg_max * 4, -1))
+            scores.append(score)
+            index.append(idx)
+        mc = torch.cat([cv5[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)
+        index = torch.cat(index)
+        preds = dict(
+            boxes=torch.cat(boxes, 2),
+            scores=torch.cat(scores, 2),
+            feats=x,
+            index=index,
+            mask_coefficient=mc * index.int() if self.export and not self.dynamic else mc[..., index],
+        )
+        y = self._inference(preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
+
+    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
+        """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        outputs = super().forward(x)
+        preds = outputs[1] if isinstance(outputs, tuple) else outputs
+        proto = self.proto(x[0])  # mask protos
+        if isinstance(preds, dict):  # training and validating during training
+            if self.end2end:
+                preds["one2many"]["proto"] = proto
+                preds["one2one"]["proto"] = proto.detach()
+            else:
+                preds["proto"] = proto
+        if self.training:
+            return preds
+        return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode predicted bounding boxes and class probabilities, concatenated with mask coefficients."""
+        preds = super()._inference(x)
+        return torch.cat([preds, x["mask_coefficient"]], dim=1)
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module,
+        cls_head: torch.nn.Module,
+        mask_head: torch.nn.Module,
+        contrastive_head: torch.nn.Module,
+    ) -> dict[str, torch.Tensor]:
+        """Concatenates and returns predicted bounding boxes, class probabilities, and mask coefficients."""
+        preds = super().forward_head(x, box_head, cls_head, contrastive_head)
+        if mask_head is not None:
+            bs = x[0].shape[0]  # batch size
+            preds["mask_coefficient"] = torch.cat([mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)
+        return preds
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Post-process YOLO model predictions.
+
+        Args:
+            preds (torch.Tensor): Raw predictions with shape (batch_size, num_anchors, 4 + nc + nm) with last dimension
+                format [x1, y1, x2, y2, class_probs, mask_coefficient].
+
+        Returns:
+            (torch.Tensor): Processed predictions with shape (batch_size, min(max_det, num_anchors), 6 + nm) and last
+                dimension format [x1, y1, x2, y2, max_class_prob, class_index, mask_coefficient].
+        """
+        boxes, scores, mask_coefficient = preds.split([4, self.nc, self.nm], dim=-1)
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        mask_coefficient = mask_coefficient.gather(dim=1, index=idx.repeat(1, 1, self.nm))
+        return torch.cat([boxes, scores, conf, mask_coefficient], dim=-1)
+
+    def fuse(self, txt_feats: torch.Tensor = None):
+        """Fuse text features with model weights for efficient inference."""
+        super().fuse(txt_feats)
+        if txt_feats is None:  # means eliminate one2many branch
+            self.cv5 = None
+            if hasattr(self.proto, "fuse"):
+                self.proto.fuse()
+            return
+
+
+class YOLOESegment26(YOLOESegment):
+    """YOLOE-style segmentation head module using Proto26 for mask generation.
+
+    This class extends the YOLOESegment functionality to include segmentation capabilities by integrating a Proto26
+    generation module and convolutional layers to predict mask coefficients.
+
+    Args:
+        nc (int): Number of classes. Defaults to 80.
+        nm (int): Number of masks. Defaults to 32.
+        npr (int): Number of prototype channels. Defaults to 256.
+        embed (int): Embedding dimensionality. Defaults to 512.
+        with_bn (bool): Whether to use Batch Normalization. Defaults to False.
+        reg_max (int): Maximum number of DFL channels. Defaults to 16.
+        end2end (bool): Whether to use end-to-end detection mode. Defaults to False.
+        ch (tuple[int, ...]): Input channels for each scale.
+
+    Attributes:
+        nm (int): Number of segmentation masks.
+        npr (int): Number of prototype channels.
+        proto (Proto26): Prototype generation module for segmentation.
+        cv5 (nn.ModuleList): Convolutional layers for generating mask coefficients from features.
+        one2one_cv5 (nn.ModuleList, optional): Deep copy of cv5 for end-to-end detection branches.
+    """
+
+    def __init__(
+        self,
+        nc: int = 80,
+        nm: int = 32,
+        npr: int = 256,
+        embed: int = 512,
+        with_bn: bool = False,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize YOLOESegment26 with class count, mask parameters, and embedding dimensions."""
+        YOLOEDetect.__init__(self, nc, embed, with_bn, reg_max, end2end, ch)
+        self.nm = nm
+        self.npr = npr
+        self.proto = Proto26(ch, self.npr, self.nm, nc)  # protos
+
+        c5 = max(ch[0] // 4, self.nm)
+        self.cv5 = nn.ModuleList(nn.Sequential(Conv(x, c5, 3), Conv(c5, c5, 3), nn.Conv2d(c5, self.nm, 1)) for x in ch)
+        if end2end:
+            self.one2one_cv5 = copy.deepcopy(self.cv5)
+
+    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
+        """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        outputs = YOLOEDetect.forward(self, x)
+        preds = outputs[1] if isinstance(outputs, tuple) else outputs
+        proto = self.proto([xi.detach() for xi in x], return_semseg=False)  # mask protos
+
+        if isinstance(preds, dict):  # training and validating during training
+            if self.end2end and not hasattr(self, "lrpc"):  # not prompt-free
+                preds["one2many"]["proto"] = proto
+                preds["one2one"]["proto"] = proto.detach()
+            else:
+                preds["proto"] = proto
+        if self.training:
+            return preds
+        return (outputs, proto) if self.export else ((outputs[0], proto), preds)

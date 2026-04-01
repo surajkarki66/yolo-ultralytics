@@ -6,7 +6,8 @@ from pytorch_nndct.apis import torch_quantizer
 import torch
 random.seed(0)
 torch.manual_seed(0)
-torch.cuda.manual_seed(0)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(0)
 import cv2
 
 
@@ -90,7 +91,8 @@ def run_model_exports(model):
     tensor_reg_max = model.model[-1].reg_max
     tensor_nc = model.model[-1].nc
     layer_dfl = model.model[-1].dfl
-    with open("quantize_result/{}_config_no_srd_reg_nc_dfl.pkl".format(args.model_path[12:-3]),'wb') as f:
+    model_stem = Path(args.model_path).stem
+    with open("quantize_result/{}_config_no_srd_reg_nc_dfl.pkl".format(model_stem), 'wb') as f:
         pickle.dump((tensor_no,tensor_stride,tensor_reg_max,tensor_nc,layer_dfl), f)
     return
 
@@ -246,7 +248,6 @@ def quantization(title='optimize',
 
 if __name__ == '__main__':
 
-  file_path = os.path.join(args.model_path)
   feature_test = ' quantization'
   # force to merge BN with CONV for better quantization accuracy
   args.optimize = 1

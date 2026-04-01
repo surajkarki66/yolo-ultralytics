@@ -127,7 +127,6 @@ def run_training():
         logger.info("Training completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during training: {str(e)}")
         return False
 
@@ -140,7 +139,6 @@ def run_testing():
         logger.info("Testing completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during testing: {str(e)}")
         return False
 
@@ -154,7 +152,6 @@ def run_cross_validation_cmd():
         logger.info("Cross-validation completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during cross-validation: {str(e)}")
         return False
 
@@ -167,7 +164,6 @@ def run_benchmark():
         logger.info("Benchmarking completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during benchmarking: {str(e)}")
         return False
 
@@ -180,7 +176,6 @@ def run_export():
         logger.info("Model export completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during export: {str(e)}")
         return False
 
@@ -193,7 +188,6 @@ def run_tuning():
         logger.info("Hyperparameter tuning completed successfully!")
         return True
     except Exception as e:
-        print(e)
         logger.error(f"Error during hyperparameter tuning: {str(e)}")
         return False
 
@@ -229,7 +223,6 @@ def main():
             
         sys.exit(0 if success else 1)
     except Exception as e:
-        print(e)
         logger.error(f"Error: {str(e)}")
         sys.exit(1)
 

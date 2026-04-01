@@ -11,6 +11,8 @@ from sklearn.model_selection import KFold
 
 from .utils import load_config
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
 def run_cross_validation():
     """Run the k-fold cross-validation process and return the summary DataFrame."""
     # ===================== Load Config ======================
@@ -79,7 +81,11 @@ def run_cross_validation():
     shutil.rmtree(KSET_PATH, ignore_errors=True)
     KSET_PATH.mkdir(parents=True, exist_ok=True)
 
-    all_images = {img.stem: img for img in TARGET_IMAGES_PATH.glob("*.jpg")}
+    all_images = {
+        img.stem: img
+        for img in TARGET_IMAGES_PATH.iterdir()
+        if img.is_file() and img.suffix.lower() in IMAGE_EXTENSIONS
+    }
 
     yaml_paths = []
 

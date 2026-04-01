@@ -125,7 +125,7 @@ wheels = [
 ]
 
 [[package]]
-name = "efficient-execution-of-object-detection-algorithms-on-edge-devices"
+name = "yolov26-ultralytics"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
