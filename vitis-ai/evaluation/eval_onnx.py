@@ -1,3 +1,19 @@
+"""Evaluate exported **ONNX** models for YOLOv26 **Detect** or **OBB** on the host.
+
+Uses ONNX Runtime to run inference, decodes raw head outputs (DFL / dist2bbox or OBB
+with angles), applies NMS, optionally draws results, and can compute mAP against
+ground-truth labels resolved from ``--data`` (Ultralytics-style YAML).
+
+Typical use: validate an ONNX export before or after quantization, or compare with
+FPGA outputs produced via ``eval_predictions_npz.py``.
+
+**Entry point:** ``python eval_onnx.py --task obb|detect --model ... --data ...``
+
+See ``parse_args()`` for the full CLI. Optional ``--quant-meta`` loads a pickle from
+the quantization step (``*_config_no_srd_reg_nc_dfl.pkl``) to align strides and
+``reg_max`` with the trained model.
+"""
+
 from __future__ import annotations
 
 import argparse

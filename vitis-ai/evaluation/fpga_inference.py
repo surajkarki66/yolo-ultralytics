@@ -1,3 +1,22 @@
+"""DPU inference for YOLOv26 **Detect** (axis-aligned) compiled ``.xmodel``.
+
+Loads a Vitis AI XIR graph, runs the DPU subgraph via ``vart``, preprocesses images
+(BGR resize + int8 quantization using tensor fix-point), and saves **raw int8 outputs**
+per image into a compressed ``.npz`` plus optional ``_fps.json``.
+
+**Environment:** AMD Vitis AI target (``xir``, ``vart``), OpenCV. Run on the board or
+an environment where the DPU runtime is available.
+
+**Output format:** Keys ``image_names``, ``output_shapes``, ``output_fixpoints``,
+``num_outputs``, and ``pred_{i}_output_{j}`` for each image index ``i`` and output
+tensor index ``j``. Use ``eval_predictions_npz.py`` with ``--task detect`` to decode,
+visualize, and compute mAP.
+
+CLI::
+
+    python fpga_inference.py <model.xmodel> <test_images_dir> <out.npz> <img_size>
+"""
+
 import cv2
 import json
 import numpy as np
@@ -197,7 +216,7 @@ if __name__ == '__main__':
         print("  output_npz_path : Output NPZ file path (e.g., predictions.npz)")
         print("  img_size        : Image size (single value for square images, e.g., 416)")
         print("\nExample:")
-        print("  python fpga_inference.py model/yolov8n.xmodel ./images predictions.npz 416")
+        print("  python fpga_inference.py model/yolov26n.xmodel ./images predictions.npz 416")
         sys.exit(1)
     
     model_path = sys.argv[1]

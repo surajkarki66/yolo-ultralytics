@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""Decode **FPGA/DPU** raw outputs from ``predictions.npz`` and evaluate YOLOv26 Detect or OBB.
+
+``fpga_inference.py`` / ``fpga_inference_obb.py`` save int8 tensors and fix-point
+metadata. This script dequantizes using per-output fix points, runs the same decode /
+NMS path as the ONNX evaluators (without running the DPU), loads images from the
+dataset ``val``/``test`` path (or ``--images-root``), optionally computes mAP, and
+writes visualizations and metrics JSON.
+
+**Tasks:** ``--task detect`` (3 outputs) or ``--task obb`` (6 outputs).
+
+**Entry point:** ``python eval_predictions_npz.py --predictions-npz ... --data ...``
+
+Align ``--preprocess`` (``resize`` vs ``letterbox``) with how images were prepared
+on the FPGA. Optional ``--quant-meta`` or embedded NPZ fields supply ``reg_max`` /
+strides when not passed explicitly.
+"""
+
 from __future__ import annotations
 
 import argparse

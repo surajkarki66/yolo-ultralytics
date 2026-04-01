@@ -1,3 +1,22 @@
+"""DPU inference for YOLOv26 **Detect** and **OBB** compiled ``.xmodel`` models.
+
+Same pipeline as ``fpga_inference.py`` (XIR + ``vart`` runner, int8 preprocessing),
+with optional **OBB** mode: ``--obb`` expects **6** DPU outputs (three detection heads
++ three angle heads), matching the ONNX/OBB layout used elsewhere in this repo.
+
+**Detect (default):** three outputs, same NPZ layout as ``fpga_inference.py``.
+
+**OBB:** NPZ may include ``reg_max``, ``strides``, ``model_type``, and image size
+metadata for downstream ``eval_predictions_npz.py --task obb``.
+
+**Environment:** ``xir``, ``vart``, OpenCV.
+
+CLI::
+
+    python fpga_inference_obb.py <model.xmodel> <images_dir> <out.npz> <img_size>
+    python fpga_inference_obb.py ... --obb   # YOLOv26-OBB six-output model
+"""
+
 import cv2
 import json
 import numpy as np
@@ -33,7 +52,7 @@ def preprocess_image(image, input_scale, width=416, height=416):
     return image_scaled
 
 
-# YOLOv11-OBB: 6 outputs (3 detection + 3 angle)
+#6 outputs (3 detection + 3 angle)
 OBB_NUM_OUTPUTS = 6
 OBB_REG_MAX = 16
 OBB_STRIDES = [8, 16, 32]
@@ -43,7 +62,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
     """
     Run Vitis AI model on all test images and save raw outputs.
     
-    For YOLOv11-OBB: model must have 6 outputs — outputs 0,1,2 = detection heads,
+    For YOLOv26-OBB: model must have 6 outputs — outputs 0,1,2 = detection heads,
     outputs 3,4,5 = angle heads (same order as ONNX in test.py / inference.py).
     
     Args:
@@ -52,7 +71,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
         output_npz_path: Path to save compressed NPZ file with predictions
         img_height: Input image height
         img_width: Input image width
-        obb: If True, use YOLOv11-OBB format (6 outputs: 3 detect + 3 angle)
+        obb: If True, use YOLOv26-OBB format (6 outputs: 3 detect + 3 angle)
     """
     
     print(f"Loading model from: {model_path}")
@@ -74,7 +93,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
     output_fixpoints = [tensor.get_attr("fix_point") for tensor in outputTensors]
     
     if obb and len(output_shapes) != OBB_NUM_OUTPUTS:
-        print(f"ERROR: YOLOv11-OBB expects {OBB_NUM_OUTPUTS} outputs (3 detect + 3 angle), got {len(output_shapes)}")
+        print(f"ERROR: YOLOv26-OBB expects {OBB_NUM_OUTPUTS} outputs (3 detect + 3 angle), got {len(output_shapes)}")
         sys.exit(1)
     
     print(f"Input shape: {input_shape}")
@@ -82,7 +101,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
     print(f"Output shapes: {output_shapes}")
     print(f"Output fix_points: {output_fixpoints}")
     if obb:
-        print(f"Model type: YOLOv11-OBB (outputs 0,1,2=detect, 3,4,5=angle)")
+        print(f"Model type: YOLOv26-OBB (outputs 0,1,2=detect, 3,4,5=angle)")
     
     # Get all image files
     IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp']
@@ -194,7 +213,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
     print(f"   Size: {file_size_mb:.2f} MB")
     print(f"   Format: Compressed NPZ (int8)")
     if obb:
-        print(f"   Model: YOLOv11-OBB (outputs 0,1,2=detect, 3,4,5=angle)")
+        print(f"   Model: YOLOv26-OBB (outputs 0,1,2=detect, 3,4,5=angle)")
     print(f"{'='*70}\n")
 
     # Save FPS statistics to JSON (FPGA/DPU only)
@@ -214,12 +233,12 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description="Run YOLOv11 / YOLOv11-OBB on FPGA and save raw outputs to NPZ")
+    parser = argparse.ArgumentParser(description="Run YOLOv26 / YOLOv26-OBB on FPGA and save raw outputs to NPZ")
     parser.add_argument("model_path", help="Path to .xmodel file")
     parser.add_argument("test_data_path", help="Path to folder containing test images")
     parser.add_argument("output_npz_path", help="Output NPZ file path (e.g., predictions.npz)")
     parser.add_argument("img_size", type=int, help="Image size (single value for square images, e.g., 416)")
-    parser.add_argument("--obb", action="store_true", help="YOLOv11-OBB model (6 outputs: 3 detect + 3 angle)")
+    parser.add_argument("--obb", action="store_true", help="YOLOv26-OBB model (6 outputs: 3 detect + 3 angle)")
     args = parser.parse_args()
 
     model_path = args.model_path

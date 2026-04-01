@@ -1,3 +1,13 @@
+"""Shared utilities for YOLOv26 Vitis AI evaluation (host-side).
+
+This module provides metric containers (``DetMetrics``, ``OBBMetrics``), NMS helpers,
+YAML loading compatible with Ultralytics-style ``data.yaml``, IoU / rotated IoU utilities,
+and small mixins used by ``eval_onnx.py`` and ``eval_predictions_npz.py``.
+
+It is intended to be imported from the ``vitis-ai/evaluation`` directory (same folder
+as those scripts). Requires PyTorch, NumPy, and optional Polars for DataFrame export.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
