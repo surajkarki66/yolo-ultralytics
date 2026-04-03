@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""Decode **FPGA/DPU** raw outputs from ``predictions.npz`` and evaluate YOLOv26 Detect or OBB.
-
-``fpga_inference.py`` / ``fpga_inference_obb.py`` save int8 tensors and fix-point
-metadata. This script dequantizes using per-output fix points, runs the same decode /
-NMS path as the ONNX evaluators (without running the DPU), loads images from the
-dataset ``val``/``test`` path (or ``--images-root``), optionally computes mAP, and
-writes visualizations and metrics JSON.
-
-**Tasks:** ``--task detect`` (3 outputs) or ``--task obb`` (6 outputs).
-
-**Entry point:** ``python eval_predictions_npz.py --predictions-npz ... --data ...``
-
-Align ``--preprocess`` (``resize`` vs ``letterbox``) with how images were prepared
-on the FPGA. Optional ``--quant-meta`` or embedded NPZ fields supply ``reg_max`` /
-strides when not passed explicitly.
-"""
+"""Decode FPGA/DPU ``predictions.npz`` for YOLOv26 Detect or OBB; visualize and optional mAP."""
 
 from __future__ import annotations
 
@@ -34,12 +19,7 @@ sys.path.insert(0, str(THIS_DIR))
 from utils import DetMetrics, OBBMetrics, TorchNMS, YAML, batch_probiou, box_iou, check_yaml
 
 
-# ============================================================================
-# POST-PROCESSING EVALUATORS
-# ============================================================================
-
 def xyxyxyxy2xywhr(x):
-    """Convert OBB corners [x1,y1,...,x4,y4] to [cx,cy,w,h,theta]."""
     is_torch = isinstance(x, torch.Tensor)
     points = x.cpu().numpy() if is_torch else x
     points = points.reshape(len(x), -1, 2)
@@ -59,8 +39,6 @@ def xyxyxyxy2xywhr(x):
 
 
 class DetectMapEvaluator:
-    """Detection mAP evaluator for YOLOv26 Detect predictions."""
-
     def __init__(self, names: list[str]) -> None:
         self.names = {i: n for i, n in enumerate(names)}
         self.metrics = DetMetrics(self.names)
@@ -112,7 +90,6 @@ class DetectMapEvaluator:
 
     @staticmethod
     def _load_gt_boxes(image_path: Path, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load GT labels supporting detect (cls xywhn) and fallback OBB polygon (cls x1..y4)."""
         label_path = DetectMapEvaluator._resolve_label_path(image_path)
         if not label_path.exists():
             return torch.zeros((0,), dtype=torch.float32), torch.zeros((0, 4), dtype=torch.float32)
@@ -137,10 +114,6 @@ class DetectMapEvaluator:
         return torch.tensor(cls_list, dtype=torch.float32), torch.tensor(np.stack(box_list), dtype=torch.float32)
 
     def update(self, image_path: Path, det: np.ndarray, im_shape: tuple[int, int]) -> None:
-        """Update mAP stats for one image.
-
-        det format: Nx6 [x1, y1, x2, y2, conf, cls]
-        """
         h, w = im_shape
         tcls, tboxes = self._load_gt_boxes(image_path, h, w)
 
@@ -172,14 +145,12 @@ class DetectMapEvaluator:
             }
         )
 
-    def finalize(self, save_dir: Path) -> dict[str, float]:
-        self.metrics.process(save_dir=save_dir, plot=False)
+    def finalize(self) -> dict[str, float]:
+        self.metrics.process()
         return self.metrics.results_dict
 
 
 class OBBMapEvaluator:
-    """OBB mAP evaluator for YOLOv26 OBB26 predictions."""
-
     def __init__(self, names: list[str]) -> None:
         self.names = {i: n for i, n in enumerate(names)}
         self.metrics = OBBMetrics(self.names)
@@ -217,7 +188,6 @@ class OBBMapEvaluator:
 
     @staticmethod
     def _load_gt_obb(image_path: Path, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load OBB labels in YOLO OBB txt format: cls x1 y1 x2 y2 x3 y3 x4 y4 (normalized)."""
         label_path = OBBMapEvaluator._resolve_label_path(image_path)
         if not label_path.exists():
             return torch.zeros((0,), dtype=torch.float32), torch.zeros((0, 5), dtype=torch.float32)
@@ -244,10 +214,6 @@ class OBBMapEvaluator:
         return cls, obb
 
     def update(self, image_path: Path, det: np.ndarray, im_shape: tuple[int, int]) -> None:
-        """Update mAP stats for one image.
-
-        det format: Nx7 [x, y, w, h, conf, cls, angle]
-        """
         h, w = im_shape
         tcls, tbboxes = self._load_gt_obb(image_path, h, w)
 
@@ -279,19 +245,12 @@ class OBBMapEvaluator:
             }
         )
 
-    def finalize(self, save_dir: Path) -> dict[str, float]:
-        self.metrics.process(save_dir=save_dir, plot=False)
+    def finalize(self) -> dict[str, float]:
+        self.metrics.process()
         return self.metrics.results_dict
 
 
-# ============================================================================
-# DECODER + POSTPROCESSORS FOR NPZ 
-# ============================================================================
-
-
 class DetectFromNPZ:
-    """YOLOv26 Detect decoder/postprocess for dequantized FPGA outputs."""
-
     def __init__(
         self,
         data: str | None,
@@ -340,23 +299,15 @@ class DetectFromNPZ:
 
     @staticmethod
     def _to_bchw(x: np.ndarray, min_channels: int) -> np.ndarray:
-        """Convert NHWC or NCHW tensor to NCHW.
-
-        Important: FPGA/ONNX export can change output layout. We use the *expected* channel count
-        to decide which axis is channels.
-        """
         if x.ndim != 4:
             raise ValueError(f"Expected 4D tensor, got shape {x.shape}")
 
-        # NCHW: [B, C, H, W]
         if x.shape[1] == min_channels:
             return x
 
-        # NHWC: [B, H, W, C]
         if x.shape[-1] == min_channels:
             return np.transpose(x, (0, 3, 1, 2))
 
-        # Fallback: keep previous heuristic when exact channel count doesn't match (e.g., C >= min_channels).
         c1 = int(x.shape[1])
         c_last = int(x.shape[-1])
         if c1 >= min_channels and c_last < min_channels:
@@ -364,7 +315,6 @@ class DetectFromNPZ:
         if c_last >= min_channels and c1 < min_channels:
             return np.transpose(x, (0, 3, 1, 2))
 
-        # Ambiguous: pick the axis closer to expected channels.
         if abs(c1 - min_channels) <= abs(c_last - min_channels):
             return x
         return np.transpose(x, (0, 3, 1, 2))
@@ -382,15 +332,12 @@ class DetectFromNPZ:
     def decode(self, outputs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         levels = self._split_outputs(outputs)
 
-        # FPGA output tensor order may differ from ONNXRuntime output order.
-        # Reorder levels by estimated stride from feature-map height.
         min_c = 4 * self.reg_max + self.nc
         reordered = []
         for s in self.strides:
-            best = None  # (abs_diff, idx)
+            best = None
             for idx, out in enumerate(levels):
                 out_bchw = self._to_bchw(out, min_c)
-                # out_bchw: [B, C, H, W]
                 _, _c, h, _w = out_bchw.shape
                 stride_est = float(self.imgsz) / float(h)
                 diff = abs(stride_est - float(s))
@@ -430,7 +377,7 @@ class DetectFromNPZ:
         if self.reg_max > 1:
             proj = np.arange(self.reg_max, dtype=np.float32).reshape(1, 1, self.reg_max, 1)
             dist_prob = self._softmax(dist_logits, axis=2)
-            pred_dist = np.sum(dist_prob * proj, axis=2)  # [1,4,anchors]
+            pred_dist = np.sum(dist_prob * proj, axis=2)
         else:
             pred_dist = dist_logits.reshape(1, 4, -1)
 
@@ -440,10 +387,10 @@ class DetectFromNPZ:
         x2y2 = anchors[None] + rb
         xyxy = np.concatenate((x1y1, x2y2), axis=-1)
 
-        scale4 = np.repeat(strides, 4, axis=1)  # [anchors,4]
+        scale4 = np.repeat(strides, 4, axis=1)
         xyxy = xyxy * scale4[None]
 
-        scores = self._sigmoid(np.transpose(cls_logits, (0, 2, 1)))  # [1,anchors,nc]
+        scores = self._sigmoid(np.transpose(cls_logits, (0, 2, 1)))
         return xyxy[0], scores[0]
 
     def postprocess(self, xyxy: np.ndarray, scores: np.ndarray, meta: dict) -> np.ndarray:
@@ -503,8 +450,6 @@ class DetectFromNPZ:
 
 
 class OBB26FromNPZ:
-    """YOLOv26 OBB26 decoder/postprocess for dequantized FPGA outputs."""
-
     def __init__(
         self,
         data: str | None,
@@ -542,16 +487,13 @@ class OBB26FromNPZ:
 
     @staticmethod
     def _to_bchw(x: np.ndarray, min_channels: int) -> np.ndarray:
-        """Convert BCHW/BHWC tensor to BCHW using channel heuristics."""
         if x.ndim != 4:
             raise ValueError(f"Expected 4D tensor, got shape {x.shape}")
-        # Prefer exact match on the channel axis.
         if x.shape[1] == min_channels:
             return x
         if x.shape[-1] == min_channels:
             return np.transpose(x, (0, 3, 1, 2))
 
-        # Fallback: heuristic for >= min_channels.
         c1 = int(x.shape[1])
         c_last = int(x.shape[-1])
         if c1 >= min_channels and c_last < min_channels:
@@ -569,14 +511,6 @@ class OBB26FromNPZ:
         return np.stack((sx, sy), axis=-1).reshape(-1, 2)
 
     def _split_outputs(self, outputs: list[np.ndarray]) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        """Split 6 outputs into (boxcls_levels, angle_levels).
-
-        FPGA/VART output order is not guaranteed to match ONNXRuntime.
-        We infer which tensors are box+cls vs angle by checking the channel dimension:
-        - boxcls expected channels = 4*reg_max + nc
-        - angle expected channels = ne
-        Works for both NCHW ([B,C,H,W]) and NHWC ([B,H,W,C]) layouts.
-        """
         if len(outputs) != 6:
             raise ValueError(f"OBB expects exactly 6 outputs (split6), got {len(outputs)}")
 
@@ -590,10 +524,8 @@ class OBB26FromNPZ:
                 continue
             c1 = int(out.shape[1])
             clast = int(out.shape[-1])
-            # NCHW channel axis
             if c1 == box_ch or clast == box_ch:
                 box_idxs.append(i)
-            # Angle has ne channels. In YOLOv26 exports ne is typically 1.
             if c1 == self.ne or clast == self.ne:
                 angle_idxs.append(i)
 
@@ -797,7 +729,6 @@ def iter_images(source: Path) -> list[Path]:
 
 
 def resolve_source_from_data(data_arg: str | None) -> Path:
-    """Resolve validation image path from dataset YAML (val -> test fallback)."""
     if not data_arg:
         raise ValueError("--data is required.")
 
@@ -827,7 +758,6 @@ def resolve_source_from_data(data_arg: str | None) -> Path:
 
 
 def apply_quant_meta(args: argparse.Namespace) -> None:
-    """Override decode parameters from quantization metadata pkl (same as YOLOv26 main.py)."""
     if not args.quant_meta:
         return
 
@@ -853,7 +783,6 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
 
 
 def build_meta(im0: np.ndarray, imgsz: int, preprocess: str) -> dict:
-    """Build meta dict consumed by postprocess() for scaling back to original image coords."""
     h0, w0 = im0.shape[:2]
     if preprocess == "resize":
         return {"mode": "resize", "h0": h0, "w0": w0}
@@ -1080,7 +1009,7 @@ def main() -> None:
             print("[WARN] No images matched NPZ 'image_names' to actual images, so mAP cannot be computed.")
             print("       Fix: use --images-root (or adjust --data) so the NPZ image filenames exist in the evaluated images folder.")
         else:
-            results = map_eval.finalize(save_dir)
+            results = map_eval.finalize()
             print("===== mAP Results =====")
             metrics = {
                 "precision": float(results.get("metrics/precision(B)", 0.0)),

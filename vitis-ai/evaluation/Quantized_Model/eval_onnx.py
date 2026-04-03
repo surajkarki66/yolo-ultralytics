@@ -1,47 +1,35 @@
-"""Evaluate exported **ONNX** models for YOLOv26 **Detect** or **OBB** on the host.
-
-Uses ONNX Runtime to run inference, decodes raw head outputs (DFL / dist2bbox or OBB
-with angles), applies NMS, optionally draws results, and can compute mAP against
-ground-truth labels resolved from ``--data`` (Ultralytics-style YAML).
-
-Typical use: validate an ONNX export before or after quantization, or compare with
-FPGA outputs produced via ``eval_predictions_npz.py``.
-
-**Entry point:** ``python eval_onnx.py --task obb|detect --model ... --data ...``
-
-See ``parse_args()`` for the full CLI. Optional ``--quant-meta`` loads a pickle from
-the quantization step (``*_config_no_srd_reg_nc_dfl.pkl``) to align strides and
-``reg_max`` with the trained model.
-"""
+"""ONNX Runtime eval for YOLOv26 Detect (3 outputs) or OBB (6 outputs). Writes ``metrics.json`` + visualizations."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
+from pathlib import Path
+
 import cv2
 import numpy as np
 import onnxruntime as ort
 import torch
 
-
-from pathlib import Path
-
 from utils import DetMetrics, OBBMetrics, TorchNMS, YAML, batch_probiou, box_iou, check_yaml
 
 
+def load_class_names(data: str | None, nc: int) -> list[str]:
+    if not data:
+        return [str(i) for i in range(nc)]
+    yaml_file = check_yaml(data)
+    if isinstance(yaml_file, (list, tuple)):
+        yaml_file = yaml_file[0]
+    names = YAML.load(str(yaml_file)).get("names", None)
+    if isinstance(names, dict):
+        return [names[i] for i in sorted(names)]
+    if isinstance(names, list):
+        return names
+    return [str(i) for i in range(nc)]
+
+
 class DetectONNX:
-    """ONNXRuntime evaluator for custom YOLOv26 Detect exports.
-
-    Expected export layout from your DPU Detect head:
-    - 3 outputs, one per level: [B, 4 * reg_max + nc, H, W]
-
-    Detect forward inference branch:
-    - DFL decode if reg_max > 1, otherwise direct ltrb distances
-    - dist2bbox with xyxy (x1, y1, x2, y2)
-    - sigmoid on class logits
-    - class-aware NMS
-    """
-
     def __init__(
         self,
         model: str,
@@ -54,7 +42,6 @@ class DetectONNX:
         strides: list[int],
         max_det: int,
     ) -> None:
-        self.model = model
         self.imgsz = imgsz
         self.conf = conf
         self.iou = iou
@@ -76,22 +63,8 @@ class DetectONNX:
                 print(f"[INFO] Overriding imgsz from {self.imgsz} to ONNX input size {fixed}")
                 self.imgsz = fixed
 
-        self.names = self._load_names(data, nc)
+        self.names = load_class_names(data, nc)
         self.palette = np.random.default_rng(0).integers(0, 255, (len(self.names), 3), dtype=np.uint8)
-
-    @staticmethod
-    def _load_names(data: str | None, nc: int) -> list[str]:
-        if not data:
-            return [str(i) for i in range(nc)]
-        yaml_file = check_yaml(data)
-        if isinstance(yaml_file, (list, tuple)):
-            yaml_file = yaml_file[0]
-        names = YAML.load(str(yaml_file)).get("names", None)
-        if isinstance(names, dict):
-            return [names[i] for i in sorted(names)]
-        if isinstance(names, list):
-            return names
-        return [str(i) for i in range(nc)]
 
     @staticmethod
     def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -119,7 +92,6 @@ class DetectONNX:
         out = out.astype(np.float32) / 255.0
         out = np.transpose(out, (2, 0, 1))[None]
         return out, {
-            "mode": "letterbox",
             "h0": h0,
             "w0": w0,
             "gain": r,
@@ -142,13 +114,10 @@ class DetectONNX:
         sy, sx = np.meshgrid(np.arange(h, dtype=np.float32) + 0.5, np.arange(w, dtype=np.float32) + 0.5, indexing="ij")
         return np.stack((sx, sy), axis=-1).reshape(-1, 2)
 
-    def _split_outputs(self, outputs: list[np.ndarray]) -> list[np.ndarray]:
+    def decode(self, outputs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         if len(outputs) != 3:
             raise ValueError(f"Detect expects exactly 3 outputs, got {len(outputs)}")
-        return outputs
-
-    def decode(self, outputs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-        levels = self._split_outputs(outputs)
+        levels = outputs
         dist_all, cls_all = [], []
         anchors_all, stride_all = [], []
 
@@ -217,15 +186,9 @@ class DetectONNX:
 
         det = np.concatenate((boxes[keep_idx], conf[keep_idx, None], cls[keep_idx, None]), axis=1)
 
-        if meta["mode"] == "resize":
-            sx = meta["w0"] / self.imgsz
-            sy = meta["h0"] / self.imgsz
-            det[:, [0, 2]] *= sx
-            det[:, [1, 3]] *= sy
-        else:
-            gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
-            det[:, [0, 2]] = (det[:, [0, 2]] - pad_w) / gain
-            det[:, [1, 3]] = (det[:, [1, 3]] - pad_h) / gain
+        gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
+        det[:, [0, 2]] = (det[:, [0, 2]] - pad_w) / gain
+        det[:, [1, 3]] = (det[:, [1, 3]] - pad_h) / gain
 
         det[:, [0, 2]] = np.clip(det[:, [0, 2]], 0, meta["w0"])
         det[:, [1, 3]] = np.clip(det[:, [1, 3]], 0, meta["h0"])
@@ -243,8 +206,6 @@ class DetectONNX:
 
 
 class DetectMapEvaluator:
-    """Detection mAP evaluator for ONNX predictions."""
-
     def __init__(self, names: list[str]) -> None:
         self.names = {i: n for i, n in enumerate(names)}
         self.metrics = DetMetrics(self.names)
@@ -296,7 +257,6 @@ class DetectMapEvaluator:
 
     @staticmethod
     def _load_gt_boxes(image_path: Path, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load GT labels supporting detect (cls xywhn) and fallback OBB polygon (cls x1..y4)."""
         label_path = DetectMapEvaluator._resolve_label_path(image_path)
         if not label_path.exists():
             return torch.zeros((0,), dtype=torch.float32), torch.zeros((0, 4), dtype=torch.float32)
@@ -352,25 +312,12 @@ class DetectMapEvaluator:
             }
         )
 
-    def finalize(self, save_dir: Path) -> dict[str, float]:
-        self.metrics.process(save_dir=save_dir, plot=False)
+    def finalize(self) -> dict[str, float]:
+        self.metrics.process()
         return self.metrics.results_dict
 
 
 class OBB26ONNX:
-    """ONNXRuntime evaluator for custom YOLOv26 OBB26 exports.
-
-    Supports custom export layouts:
-    - 3 outputs: one tensor per level, each containing [box_dfl, cls, angle_raw]
-    - 6 outputs: first 3 tensors are [box_dfl, cls], last 3 tensors are [angle_raw]
-
-    This decoder mirrors OBB26 math:
-    - DFL decode for distances
-    - angle = (sigmoid(raw) - 0.25) * pi
-    - dist2rbox decode with per-level anchors/strides
-    - class-wise rotated NMS
-    """
-
     def __init__(
         self,
         model: str,
@@ -384,7 +331,6 @@ class OBB26ONNX:
         strides: list[int],
         max_det: int,
     ) -> None:
-        self.model = model
         self.imgsz = imgsz
         self.conf = conf
         self.iou = iou
@@ -408,22 +354,8 @@ class OBB26ONNX:
                 print(f"[INFO] Overriding imgsz from {self.imgsz} to ONNX input size {fixed}")
                 self.imgsz = fixed
 
-        self.names = self._load_names(data, nc)
+        self.names = load_class_names(data, nc)
         self.palette = np.random.default_rng(0).integers(0, 255, (len(self.names), 3), dtype=np.uint8)
-
-    @staticmethod
-    def _load_names(data: str | None, nc: int) -> list[str]:
-        if not data:
-            return [str(i) for i in range(nc)]
-        yaml_file = check_yaml(data)
-        if isinstance(yaml_file, (list, tuple)):
-            yaml_file = yaml_file[0]
-        names = YAML.load(str(yaml_file)).get("names", None)
-        if isinstance(names, dict):
-            return [names[i] for i in sorted(names)]
-        if isinstance(names, list):
-            return names
-        return [str(i) for i in range(nc)]
 
     @staticmethod
     def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -452,7 +384,6 @@ class OBB26ONNX:
         out = np.transpose(out, (2, 0, 1))[None]
 
         meta = {
-            "mode": "letterbox",
             "h0": h0,
             "w0": w0,
             "gain": r,
@@ -463,7 +394,6 @@ class OBB26ONNX:
 
     @staticmethod
     def _to_bchw(x: np.ndarray, min_channels: int) -> np.ndarray:
-        """Convert BCHW/BHWC tensor to BCHW using channel heuristics."""
         if x.ndim != 4:
             raise ValueError(f"Expected 4D tensor, got shape {x.shape}")
         if x.shape[1] >= min_channels:
@@ -595,19 +525,11 @@ class OBB26ONNX:
             axis=1,
         )
 
-        if meta["mode"] == "resize":
-            sx = meta["w0"] / self.imgsz
-            sy = meta["h0"] / self.imgsz
-            det[:, 0] *= sx
-            det[:, 1] *= sy
-            det[:, 2] *= sx
-            det[:, 3] *= sy
-        else:
-            gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
-            det[:, 0] = (det[:, 0] - pad_w) / gain
-            det[:, 1] = (det[:, 1] - pad_h) / gain
-            det[:, 2] /= gain
-            det[:, 3] /= gain
+        gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
+        det[:, 0] = (det[:, 0] - pad_w) / gain
+        det[:, 1] = (det[:, 1] - pad_h) / gain
+        det[:, 2] /= gain
+        det[:, 3] /= gain
 
         det[:, 0] = np.clip(det[:, 0], 0, meta["w0"])
         det[:, 1] = np.clip(det[:, 1], 0, meta["h0"])
@@ -631,34 +553,8 @@ class OBB26ONNX:
             cv2.putText(out, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
         return out
 
-    def run_one(self, image_path: Path, save_dir: Path, save_txt: bool = False) -> None:
-        im0 = cv2.imread(str(image_path))
-        if im0 is None:
-            print(f"[WARN] Could not read image: {image_path}")
-            return
-
-        x, meta = self.preprocess_image(im0)
-        outputs = self.session.run(None, {self.input_name: x})
-        outputs = [o.astype(np.float32) for o in outputs]
-
-        xywh, cls_scores, angles = self.decode(outputs)
-        det = self.postprocess(xywh, cls_scores, angles, meta)
-
-        vis = self.draw(im0, det)
-        out_file = save_dir / image_path.name
-        cv2.imwrite(str(out_file), vis)
-
-        if save_txt:
-            txt_file = save_dir / f"{image_path.stem}.txt"
-            with open(txt_file, "w", encoding="utf-8") as f:
-                for row in det:
-                    f.write(" ".join(f"{v:.6f}" for v in row) + "\n")
-
-        print(f"{image_path.name}: {len(det)} detections -> {out_file}")
-
 
 def xyxyxyxy2xywhr(x):
-    """Convert OBB corners [x1,y1,...,x4,y4] to [cx,cy,w,h,theta]."""
     is_torch = isinstance(x, torch.Tensor)
     points = x.cpu().numpy() if is_torch else x
     points = points.reshape(len(x), -1, 2)
@@ -678,8 +574,6 @@ def xyxyxyxy2xywhr(x):
 
 
 class OBBMapEvaluator:
-    """OBB mAP evaluator for ONNX predictions."""
-
     def __init__(self, names: list[str]) -> None:
         self.names = {i: n for i, n in enumerate(names)}
         self.metrics = OBBMetrics(self.names)
@@ -687,7 +581,6 @@ class OBBMapEvaluator:
         self.niou = self.iouv.numel()
 
     def _match_predictions(self, pred_cls: torch.Tensor, true_cls: torch.Tensor, iou: torch.Tensor) -> torch.Tensor:
-        """Match predictions to GT using greedy IoU assignment per threshold."""
         correct = np.zeros((pred_cls.shape[0], self.niou), dtype=bool)
         if pred_cls.numel() == 0 or true_cls.numel() == 0:
             return torch.tensor(correct, dtype=torch.bool)
@@ -718,7 +611,6 @@ class OBBMapEvaluator:
 
     @staticmethod
     def _load_gt_obb(image_path: Path, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Load OBB labels in YOLO OBB txt format: cls x1 y1 x2 y2 x3 y3 x4 y4 (normalized)."""
         label_path = OBBMapEvaluator._resolve_label_path(image_path)
         if not label_path.exists():
             return torch.zeros((0,), dtype=torch.float32), torch.zeros((0, 5), dtype=torch.float32)
@@ -745,10 +637,6 @@ class OBBMapEvaluator:
         return cls, obb
 
     def update(self, image_path: Path, det: np.ndarray, im_shape: tuple[int, int]) -> None:
-        """Update mAP stats for one image.
-
-        det format: Nx7 [x, y, w, h, conf, cls, angle]
-        """
         h, w = im_shape
         tcls, tbboxes = self._load_gt_obb(image_path, h, w)
 
@@ -780,8 +668,8 @@ class OBBMapEvaluator:
             }
         )
 
-    def finalize(self, save_dir: Path) -> dict[str, float]:
-        self.metrics.process(save_dir=save_dir, plot=False)
+    def finalize(self) -> dict[str, float]:
+        self.metrics.process()
         return self.metrics.results_dict
 
 
@@ -816,7 +704,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save detections as txt. detect: x1 y1 x2 y2 conf cls, obb: x y w h conf cls angle",
     )
-    parser.add_argument("--eval-map", action="store_true", help="Compute mAP50 and mAP50-95")
     return parser.parse_args()
 
 
@@ -828,10 +715,6 @@ def iter_images(source: Path) -> list[Path]:
 
 
 def resolve_source_from_data(data_arg: str | None) -> Path:
-    """Resolve validation image path from dataset yaml.
-
-    Priority: val -> test. If a list is provided, uses the first entry.
-    """
     if not data_arg:
         raise ValueError("--data is required.")
 
@@ -860,7 +743,6 @@ def resolve_source_from_data(data_arg: str | None) -> Path:
 
 
 def apply_quant_meta(args: argparse.Namespace) -> None:
-    """Override model decode settings from quantization metadata pkl when provided."""
     if not args.quant_meta:
         return
 
@@ -884,6 +766,18 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
     )
 
 
+def _print_and_save_metrics(results: dict[str, float], save_dir: Path, task_title: str) -> None:
+    path = save_dir / "metrics.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    print(f"\n===== {task_title} mAP Results =====")
+    print(f"Precision:  {results.get('metrics/precision(B)', 0.0):.6f}")
+    print(f"Recall:     {results.get('metrics/recall(B)', 0.0):.6f}")
+    print(f"mAP50:      {results.get('metrics/mAP50(B)', 0.0):.6f}")
+    print(f"mAP50-95:   {results.get('metrics/mAP50-95(B)', 0.0):.6f}")
+    print(f"Metrics saved to {path}")
+
+
 def run_obb(args: argparse.Namespace, images: list[Path], save_dir: Path, source: Path, strides: list[int]) -> None:
     evaluator = OBB26ONNX(
         model=args.model,
@@ -904,7 +798,7 @@ def run_obb(args: argparse.Namespace, images: list[Path], save_dir: Path, source
     print(f"Images found: {len(images)}")
     print(f"Output dir: {save_dir}")
 
-    map_eval = OBBMapEvaluator(evaluator.names) if args.eval_map else None
+    map_eval = OBBMapEvaluator(evaluator.names)
 
     for im_path in images:
         im0 = cv2.imread(str(im_path))
@@ -930,16 +824,10 @@ def run_obb(args: argparse.Namespace, images: list[Path], save_dir: Path, source
 
         print(f"{im_path.name}: {len(det)} detections -> {out_file}")
 
-        if map_eval is not None:
-            map_eval.update(im_path, det, im0.shape[:2])
+        map_eval.update(im_path, det, im0.shape[:2])
 
-    if map_eval is not None:
-        results = map_eval.finalize(save_dir)
-        print("\n===== OBB mAP Results =====")
-        print(f"Precision:  {results.get('metrics/precision(B)', 0.0):.6f}")
-        print(f"Recall:     {results.get('metrics/recall(B)', 0.0):.6f}")
-        print(f"mAP50:      {results.get('metrics/mAP50(B)', 0.0):.6f}")
-        print(f"mAP50-95:   {results.get('metrics/mAP50-95(B)', 0.0):.6f}")
+    results = map_eval.finalize()
+    _print_and_save_metrics(results, save_dir, "OBB")
 
 
 def run_detect(args: argparse.Namespace, images: list[Path], save_dir: Path, source: Path, strides: list[int]) -> None:
@@ -961,7 +849,7 @@ def run_detect(args: argparse.Namespace, images: list[Path], save_dir: Path, sou
     print(f"Images found: {len(images)}")
     print(f"Output dir: {save_dir}")
 
-    map_eval = DetectMapEvaluator(evaluator.names) if args.eval_map else None
+    map_eval = DetectMapEvaluator(evaluator.names)
 
     for im_path in images:
         im0 = cv2.imread(str(im_path))
@@ -987,16 +875,10 @@ def run_detect(args: argparse.Namespace, images: list[Path], save_dir: Path, sou
 
         print(f"{im_path.name}: {len(det)} detections -> {out_file}")
 
-        if map_eval is not None:
-            map_eval.update(im_path, det, im0.shape[:2])
+        map_eval.update(im_path, det, im0.shape[:2])
 
-    if map_eval is not None:
-        results = map_eval.finalize(save_dir)
-        print("\n===== Detect mAP Results =====")
-        print(f"Precision:  {results.get('metrics/precision(B)', 0.0):.6f}")
-        print(f"Recall:     {results.get('metrics/recall(B)', 0.0):.6f}")
-        print(f"mAP50:      {results.get('metrics/mAP50(B)', 0.0):.6f}")
-        print(f"mAP50-95:   {results.get('metrics/mAP50-95(B)', 0.0):.6f}")
+    results = map_eval.finalize()
+    _print_and_save_metrics(results, save_dir, "Detect")
 
 
 def main() -> None:
