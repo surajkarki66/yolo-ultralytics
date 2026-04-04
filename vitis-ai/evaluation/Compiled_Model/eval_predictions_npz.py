@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Decode FPGA/DPU ``predictions.npz`` for YOLOv26 Detect or OBB; visualize and optional mAP."""
-
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -415,15 +414,10 @@ class DetectFromNPZ:
 
         det = np.concatenate((boxes[keep_idx], conf[keep_idx, None], cls[keep_idx, None]), axis=1)
 
-        if meta["mode"] == "resize":
-            sx = meta["w0"] / self.imgsz
-            sy = meta["h0"] / self.imgsz
-            det[:, [0, 2]] *= sx
-            det[:, [1, 3]] *= sy
-        else:
-            gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
-            det[:, [0, 2]] = (det[:, [0, 2]] - pad_w) / gain
-            det[:, [1, 3]] = (det[:, [1, 3]] - pad_h) / gain
+        sx = meta["w0"] / self.imgsz
+        sy = meta["h0"] / self.imgsz
+        det[:, [0, 2]] *= sx
+        det[:, [1, 3]] *= sy
 
         det[:, [0, 2]] = np.clip(det[:, [0, 2]], 0, meta["w0"])
         det[:, [1, 3]] = np.clip(det[:, [1, 3]], 0, meta["h0"])
@@ -529,13 +523,11 @@ class OBB26FromNPZ:
             if c1 == self.ne or clast == self.ne:
                 angle_idxs.append(i)
 
-        # If we can uniquely identify 3 boxcls and 3 angle tensors, use them.
         if len(box_idxs) == 3 and len(angle_idxs) == 3:
             boxcls = [outputs[i] for i in box_idxs]
             angles = [outputs[i] for i in angle_idxs]
             return boxcls, angles
 
-        # Fallback to previous assumption (may be wrong, but keeps behavior).
         boxcls = outputs[:3]
         angles = outputs[3:]
         return boxcls, angles
@@ -543,8 +535,6 @@ class OBB26FromNPZ:
     def decode(self, outputs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         boxcls_lvls, angle_lvls = self._split_outputs(outputs)
 
-        # Reorder box/angle levels independently to match expected stride order.
-        # We assume each level's grid size is proportional to `imgsz / stride`.
         min_c = 4 * self.reg_max + self.nc
 
         def _stride_est_from_box(out: np.ndarray, min_channels: int) -> float:
@@ -555,8 +545,7 @@ class OBB26FromNPZ:
         ordered_box = []
         ordered_ang = []
         for s in self.strides:
-            # pick best-matching box level
-            best_box = None  # (abs_diff, idx)
+            best_box = None
             for idx, out in enumerate(boxcls_lvls):
                 stride_est = _stride_est_from_box(out, min_c)
                 diff = abs(stride_est - float(s))
@@ -565,8 +554,7 @@ class OBB26FromNPZ:
             assert best_box is not None
             ordered_box.append(boxcls_lvls[best_box[1]])
 
-            # pick best-matching angle level
-            best_ang = None  # (abs_diff, idx)
+            best_ang = None
             for idx, out in enumerate(angle_lvls):
                 stride_est = _stride_est_from_box(out, self.ne)
                 diff = abs(stride_est - float(s))
@@ -680,19 +668,12 @@ class OBB26FromNPZ:
             axis=1,
         )
 
-        if meta["mode"] == "resize":
-            sx = meta["w0"] / self.imgsz
-            sy = meta["h0"] / self.imgsz
-            det[:, 0] *= sx
-            det[:, 1] *= sy
-            det[:, 2] *= sx
-            det[:, 3] *= sy
-        else:
-            gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
-            det[:, 0] = (det[:, 0] - pad_w) / gain
-            det[:, 1] = (det[:, 1] - pad_h) / gain
-            det[:, 2] /= gain
-            det[:, 3] /= gain
+        sx = meta["w0"] / self.imgsz
+        sy = meta["h0"] / self.imgsz
+        det[:, 0] *= sx
+        det[:, 1] *= sy
+        det[:, 2] *= sx
+        det[:, 3] *= sy
 
         det[:, 0] = np.clip(det[:, 0], 0, meta["w0"])
         det[:, 1] = np.clip(det[:, 1], 0, meta["h0"])
@@ -714,11 +695,6 @@ class OBB26FromNPZ:
             lx, ly = int(pts[0][0]), int(pts[0][1]) - 6
             cv2.putText(out, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
         return out
-
-
-# ============================================================================
-# DATASET + IMAGE META HELPERS 
-# ============================================================================
 
 
 def iter_images(source: Path) -> list[Path]:
@@ -782,36 +758,11 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
     )
 
 
-def build_meta(im0: np.ndarray, imgsz: int, preprocess: str) -> dict:
-    h0, w0 = im0.shape[:2]
-    if preprocess == "resize":
-        return {"mode": "resize", "h0": h0, "w0": w0}
-
-    if preprocess != "letterbox":
-        raise ValueError(f"Unknown preprocess mode: {preprocess} (expected 'resize' or 'letterbox')")
-
-    r = min(imgsz / h0, imgsz / w0)
-    new_w, new_h = int(round(w0 * r)), int(round(h0 * r))
-    pad_w = (imgsz - new_w) / 2.0
-    pad_h = (imgsz - new_h) / 2.0
-    left = int(round(pad_w - 0.1))
-    top = int(round(pad_h - 0.1))
-
-    return {"mode": "letterbox", "h0": h0, "w0": w0, "gain": r, "pad_w": left, "pad_h": top}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate YOLOv26 FPGA predictions.npz using YOLOv26 decode + mAP.")
     parser.add_argument("--predictions-npz", type=str, required=True, help="Path to predictions.npz from FPGA inference.")
     parser.add_argument("--task", type=str, default="obb", choices=("detect", "obb"), help="Which YOLOv26 head to evaluate.")
     parser.add_argument("--data", type=str, required=True, help="Dataset YAML for class names and validation images.")
-    parser.add_argument(
-        "--images-root",
-        type=str,
-        default=None,
-        help="Optional override for where the NPZ image files live (must match NPZ 'image_names'). "
-             "Use a path that follows the dataset convention (.../images/*.jpg) so label resolution can derive (.../labels/*.txt).",
-    )
     parser.add_argument("--quant-meta", type=str, default=None, help="Path to quantization metadata pkl (no/stride/reg_max/nc/dfl).")
     parser.add_argument("--imgsz", type=int, default=416, help="Inference image size used on FPGA.")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold.")
@@ -821,18 +772,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ne", type=int, default=1, help="Angle channels (OBB).")
     parser.add_argument("--strides", type=str, default="8,16,32", help="Comma-separated strides per output level.")
     parser.add_argument("--max-det", type=int, default=300, help="Maximum detections per image.")
-    parser.add_argument("--preprocess", type=str, default="resize", choices=("resize", "letterbox"), help="How the FPGA input image was scaled.")
     parser.add_argument("--save-dir", type=str, default=None, help="Output directory.")
     parser.add_argument("--save-txt", action="store_true", help="Save detections as txt.")
-    parser.add_argument("--eval-map", action="store_true", help="Compute mAP50 and mAP50-95.")
     parser.add_argument("--no-save-vis", action="store_true", help="Do not save visualization images.")
-    parser.add_argument(
-        "--results-json",
-        type=str,
-        default=None,
-        help="Optional path for JSON output of final mAP metrics. "
-             "If not set, writes to <save-dir>/map_results.json.",
-    )
     return parser.parse_args()
 
 
@@ -856,14 +798,7 @@ def main() -> None:
     if len(strides) != 3:
         raise ValueError(f"Expected 3 strides, got {strides}")
 
-    if args.images_root:
-        source = Path(args.images_root)
-        if not source.exists():
-            raise FileNotFoundError(f"--images-root does not exist: {source}")
-        if source.is_file():
-            raise ValueError(f"--images-root must be a directory, got file: {source}")
-    else:
-        source = resolve_source_from_data(args.data)
+    source = resolve_source_from_data(args.data)
 
     if not source.exists():
         raise FileNotFoundError(f"Resolved image directory does not exist: {source}")
@@ -881,8 +816,6 @@ def main() -> None:
     print(f"[INFO] output_shapes: {output_shapes}")
     print(f"[INFO] output_fixpoints: {output_fixpoints}")
 
-    # If the NPZ includes OBB meta (your FPGA script saves reg_max/strides for OBB),
-    # use it when quant-meta wasn't provided so decode uses correct parameters.
     if args.quant_meta is None:
         if "reg_max" in data:
             try:
@@ -914,7 +847,7 @@ def main() -> None:
             strides=strides,
             max_det=args.max_det,
         )
-        map_eval = DetectMapEvaluator(decoder.names) if args.eval_map else None
+        map_eval = DetectMapEvaluator(decoder.names)
     else:
         decoder = OBB26FromNPZ(
             data=args.data,
@@ -927,7 +860,7 @@ def main() -> None:
             strides=strides,
             max_det=args.max_det,
         )
-        map_eval = OBBMapEvaluator(decoder.names) if args.eval_map else None
+        map_eval = OBBMapEvaluator(decoder.names)
 
     total_det_time = 0.0
     total_images = 0
@@ -951,9 +884,8 @@ def main() -> None:
             total_skipped += 1
             continue
 
-        meta = build_meta(im0, args.imgsz, args.preprocess)
+        meta = {"h0": int(im0.shape[0]), "w0": int(im0.shape[1])}
 
-        # Dequantize int8 outputs using per-output fix points.
         pred_outputs: list[np.ndarray] = []
         for out_idx in range(num_outputs):
             key = f"pred_{img_idx}_output_{out_idx}"
@@ -985,8 +917,7 @@ def main() -> None:
                 for row in det:
                     f.write(" ".join(f"{v:.6f}" for v in row) + "\n")
 
-        if map_eval is not None:
-            map_eval.update(image_path, det, im0.shape[:2])
+        map_eval.update(image_path, det, im0.shape[:2])
 
         if (total_images % 10) == 0:
             avg = total_det_time / max(total_images, 1) * 1000
@@ -1004,39 +935,28 @@ def main() -> None:
         print(f"Avg per image   : {total_det_time / total_images * 1000:.2f}ms")
     print("")
 
-    if map_eval is not None:
-        if total_images == 0:
-            print("[WARN] No images matched NPZ 'image_names' to actual images, so mAP cannot be computed.")
-            print("       Fix: use --images-root (or adjust --data) so the NPZ image filenames exist in the evaluated images folder.")
-        else:
-            results = map_eval.finalize()
-            print("===== mAP Results =====")
-            metrics = {
-                "precision": float(results.get("metrics/precision(B)", 0.0)),
-                "recall": float(results.get("metrics/recall(B)", 0.0)),
-                "mAP50": float(results.get("metrics/mAP50(B)", 0.0)),
-                "mAP50-95": float(results.get("metrics/mAP50-95(B)", 0.0)),
-                "fitness": float(results.get("fitness", 0.0)),
-            }
-            print(f"Precision:  {metrics['precision']:.6f}")
-            print(f"Recall:     {metrics['recall']:.6f}")
-            print(f"mAP50:      {metrics['mAP50']:.6f}")
-            print(f"mAP50-95:   {metrics['mAP50-95']:.6f}")
+    if total_images == 0:
+        print("[WARN] No images matched NPZ 'image_names' under the dataset val/test folder; mAP is zero.")
+        results = {
+            "metrics/precision(B)": 0.0,
+            "metrics/recall(B)": 0.0,
+            "metrics/mAP50(B)": 0.0,
+            "metrics/mAP50-95(B)": 0.0,
+            "fitness": 0.0,
+        }
+    else:
+        results = map_eval.finalize()
 
-            out_json = Path(args.results_json) if args.results_json else (save_dir / "map_results.json")
-    
-            payload = {
-                "precision": float(metrics["precision"]),
-                "recall": float(metrics["recall"]),
-                "mAP50": float(metrics["mAP50"]),
-                "mAP50-95": float(metrics["mAP50-95"]),
-            }
-            out_json.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_json, "w", encoding="utf-8") as f:
-                import json
+    print("\n===== mAP Results =====")
+    print(f"Precision:  {results.get('metrics/precision(B)', 0.0):.6f}")
+    print(f"Recall:     {results.get('metrics/recall(B)', 0.0):.6f}")
+    print(f"mAP50:      {results.get('metrics/mAP50(B)', 0.0):.6f}")
+    print(f"mAP50-95:   {results.get('metrics/mAP50-95(B)', 0.0):.6f}")
 
-                json.dump(payload, f, indent=2)
-            print(f"[INFO] Saved mAP metrics JSON to: {out_json}")
+    metrics_path = save_dir / "metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump({k: float(v) if hasattr(v, "__float__") else v for k, v in results.items()}, f, indent=2)
+    print(f"Metrics saved to {metrics_path}")
 
 
 if __name__ == "__main__":
