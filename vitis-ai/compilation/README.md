@@ -5,13 +5,13 @@ This directory compiles quantized XIR models (`.xmodel`) for the target DPU on t
 ## Structure
 
 - **Architectures/** — DPU architecture JSON files (`arch_B512.json` through `arch_B4096.json`) for different board configurations. Choose the one that matches your target (e.g. `arch_B4096.json` for DPUCZDX8G_ISA1_B4096).
-- **YOLOv26/** — Place the quantized **detection** XIR model here (e.g. `DetectionModel_int.xmodel`) before running compilation.
-- **YOLOv26-OBB/** — Place the quantized **OBB** XIR model here (e.g. `OBBModel_int.xmodel`) before running compilation.
+- **YOLOv26/** — Place the quantized **detection** XIR model here (e.g. `DetectionModel_int.xmodel`) before running compilation. Used for **YOLOv26 and YOLOv11** detection models (same folder name and flow).
+- **YOLOv26-OBB/** — Place the quantized **OBB** XIR model here (e.g. `OBBModel_int.xmodel`) before running compilation. Used for **YOLOv26-OBB and YOLOv11-OBB**.
 - **run_compile.sh** — Example script that invokes `vai_c_xir` to compile the XIR model for a given architecture and output directory.
 
 ## Procedure
 
-1. Copy the quantized `.xmodel` from the quantization step into `YOLOv26/` (detection) or `YOLOv26-OBB/` (OBB).
+1. Copy the quantized `.xmodel` from the quantization step into `YOLOv26/` (detection: YOLOv26 or YOLOv11) or `YOLOv26-OBB/` (OBB: YOLOv26-OBB or YOLOv11-OBB).
 2. Choose the architecture file from `Architectures/` that matches your target DPU (e.g. B4096, B3136, B2304).
 3. Run the compiler, e.g.:
 

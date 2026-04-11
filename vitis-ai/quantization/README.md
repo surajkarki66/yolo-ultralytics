@@ -1,6 +1,6 @@
 # Vitis AI Quantization
 
-Scripts in this folder prepare and quantize YOLO models for AMD DPU targets.
+Scripts in this folder prepare and quantize YOLO models for AMD DPU targets. The same flow applies to **YOLOv26** and **YOLOv11** (and their OBB variants) for the Vitis-compatible export path in this repository.
 
 ## Contents
 

@@ -1,4 +1,5 @@
 #!/bin/bash
+# Paths YOLOv26/ and YOLOv26-OBB/ are used for both YOLOv26 and YOLOv11 quantized models.
 
 ## B4096
 #vai_c_xir -x YOLOv26/DetectionModel_int.xmodel -a ./Architectures/arch_B4096.json -o zynq_output/yolov26n/ -n yolov26n

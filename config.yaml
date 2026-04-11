@@ -1,7 +1,8 @@
 # Training Configuration
+# YOLOv26 and YOLOv11 are supported
 training:
   # Model parameters
-  model: "yolo26n.pt"  # Model to use for training
+  model: "yolo26n.pt"  # e.g. yolo26n.pt (YOLOv26) or yolo11n.pt (YOLOv11)
   
   # Data parameters
   data: "VOC.yaml"
@@ -28,7 +29,7 @@ training:
   save: true
   save_period: -1
   project: 'runs'
-  name: 'yolov26n_train'
+  name: 'yolov26n_train'  # e.g. yolo11n_train when using YOLOv11 weights
   pretrained: true
   freeze: null
   cache: false
@@ -51,13 +52,13 @@ testing:
   device: 'cuda:0'   # cpu for CPU, cuda:0 for GPU
 
   # Model parameters
-  model_path: "./runs/detect/runs/yolov26n_train/weights/best.pt"
+  model_path: "./runs/detect/runs/yolov26n_train/weights/best.pt"  # adjust run folder for YOLOv11 (e.g. .../yolo11n_train/...)
   
   # Testing parameters
   batch: 32
   workers: 8
   project: 'runs'
-  name: 'yolov26n_test'
+  name: 'yolov26n_test'  # e.g. yolo11n_test for YOLOv11 runs
   save_txt: true
   save_conf: true
   save_json: true

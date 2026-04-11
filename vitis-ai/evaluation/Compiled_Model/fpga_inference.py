@@ -28,6 +28,7 @@ def get_child_subgraph_dpu(graph: "Graph"):
 
 def preprocess_image(image, input_scale, width=416, height=416):
     """Preprocess frame for YOLO input"""
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image_resized = cv2.resize(image, (width, height))
     image_normalized = image_resized.astype(np.float32) / 255.0
     image_scaled = (image_normalized * input_scale).astype(np.int8)

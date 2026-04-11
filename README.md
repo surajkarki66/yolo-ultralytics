@@ -12,8 +12,8 @@ The main CLI entrypoint is `main.py`.
 
 - This repository can be adapted for multiple YOLO versions in general workflows.
 - For the Vitis AI-compatible training and deployment path in this repo, supported models are:
-  - `YOLOv26` (Detect)
-  - `YOLOv26-OBB` (Oriented Bounding Boxes)
+  - `YOLOv26` / `YOLOv11` (Detect)
+  - `YOLOv26-OBB` / `YOLOv11-OBB` (Oriented Bounding Boxes)
 
 ## Quick Start
 
@@ -123,7 +123,9 @@ cd vitis-ai/compilation
 vai_c_xir -x YOLOv26/DetectionModel_int.xmodel -a Architectures/arch_B4096.json -o zynq_output/yolov26n/ -n yolov26n
 ```
 
-For OBB, compile the model under `YOLOv26-OBB/` with the matching output name.
+The `YOLOv26/` and `YOLOv26-OBB/` directories are used for **both** YOLOv26 and YOLOv11 quantized `.xmodel` files (same layout and compilation flow).
+
+For OBB, compile the model under `YOLOv26-OBB/` (YOLOv26-OBB or YOLOv11-OBB) with the matching output name.
 
 ## Dataset Layout
 

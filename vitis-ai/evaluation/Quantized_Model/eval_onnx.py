@@ -1,4 +1,4 @@
-"""ONNX Runtime eval for YOLOv26 Detect (3 outputs) or OBB (6 outputs). Writes ``metrics.json`` + visualizations."""
+"""ONNX Runtime eval for YOLOv26 / YOLOv11 Detect (3 outputs) or OBB (6 outputs). Writes ``metrics.json`` + visualizations."""
 
 from __future__ import annotations
 
@@ -674,7 +674,7 @@ class OBBMapEvaluator:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate custom YOLOv26 ONNX outputs for OBB or Detect.")
+    parser = argparse.ArgumentParser(description="Evaluate custom YOLOv26 / YOLOv11 ONNX outputs for OBB or Detect.")
     parser.add_argument(
         "--task",
         type=str,

@@ -214,7 +214,7 @@ def run_fpga_inference(model_path, test_data_path, output_npz_path, img_height=4
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description="Run YOLOv26 / YOLOv26-OBB on FPGA and save raw outputs to NPZ")
+    parser = argparse.ArgumentParser(description="Run YOLOv26 / YOLOv11 (and OBB variants) on FPGA and save raw outputs to NPZ")
     parser.add_argument("model_path", help="Path to .xmodel file")
     parser.add_argument("test_data_path", help="Path to folder containing test images")
     parser.add_argument("output_npz_path", help="Output NPZ file path (e.g., predictions.npz)")
