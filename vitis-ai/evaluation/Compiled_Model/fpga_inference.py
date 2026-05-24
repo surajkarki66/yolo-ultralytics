@@ -198,7 +198,7 @@ if __name__ == '__main__':
         print("  output_npz_path : Output NPZ file path (e.g., predictions.npz)")
         print("  img_size        : Image size (single value for square images, e.g., 416)")
         print("\nExample:")
-        print("  python fpga_inference.py model/yolov8n.xmodel ./images predictions.npz 416")
+        print("  python fpga_inference.py model/yolov26n.xmodel ./images predictions.npz 416")
         sys.exit(1)
     
     model_path = sys.argv[1]

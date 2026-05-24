@@ -21,20 +21,14 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument(
     '--model_path',
-    default="yolov8n",
-    help='Model path to process. Eg: yolov8x'
+    default="best.pt",
+    help='Ultralytics checkpoint path (e.g. best.pt or yolo26n.pt)',
 )
 
 parser.add_argument(
     '--config_file',
     default=None,
     help='quantization configuration file')
-
-parser.add_argument(
-    '--subset_len',
-    default=None,
-    type=int,
-    help='subset_len to evaluate model, using the whole validation dataset if it is not set')
 
 parser.add_argument(
     '--batch_size',
@@ -53,11 +47,6 @@ parser.add_argument('--deploy',
     dest='deploy',
     action='store_true',
     help='export xmodel for deployment')
-
-parser.add_argument('--inspect', 
-    dest='inspect',
-    action='store_true',
-    help='inspect model')
 
 parser.add_argument('--target', 
     dest='target',
@@ -83,6 +72,12 @@ parser.add_argument(
 args, _ = parser.parse_known_args()
 
 
+def detect_config_pickle_path(model_path: str) -> Path:
+    """Build a stable pickle path from the checkpoint filename (e.g. best.pt -> best_...pkl)."""
+    stem = Path(model_path).stem or "model"
+    return Path("quantize_result") / f"{stem}_config_no_srd_reg_nc_dfl.pkl"
+
+
 def run_model_exports(model):
     import pickle
     tensor_no = model.model[-1].no
@@ -90,8 +85,11 @@ def run_model_exports(model):
     tensor_reg_max = model.model[-1].reg_max
     tensor_nc = model.model[-1].nc
     layer_dfl = model.model[-1].dfl
-    with open("quantize_result/{}_config_no_srd_reg_nc_dfl.pkl".format(args.model_path[12:-3]),'wb') as f:
-        pickle.dump((tensor_no,tensor_stride,tensor_reg_max,tensor_nc,layer_dfl), f)
+    output_path = detect_config_pickle_path(args.model_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        pickle.dump((tensor_no, tensor_stride, tensor_reg_max, tensor_nc, layer_dfl), f)
+    print(f"Saved detect head config to {output_path}")
     return
 
 
@@ -100,21 +98,21 @@ FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}"
 
 class LoadImages:
     """
-    YOLOv8 image dataloader.
+    Calibration image dataloader for YOLOv26 / YOLOv11 quantization.
 
-    This class manages the loading and pre-processing of image data for YOLOv8. It supports loading from
-    various formats, including single image files and lists of image paths.
-
-    Attributes:
-        files (list): List of image file paths.
-        nf (int): Total number of files (images).
-        mode (str): Current mode, 'image'.
-        bs (int): Batch size.
-        count (int): Counter for iteration, initialized at 0 during `__iter__()`.
+    Loads image paths from a txt file, directory, glob, or single file and
+    resizes each image to the target width and height before batching.
     """
 
-    def __init__(self, path, batch=1):
-        """Initialize the Dataloader and raise FileNotFoundError if file not found."""
+    def __init__(self, path, batch=1, img_size=(640, 640)):
+        """Initialize the dataloader and raise FileNotFoundError if file not found.
+
+        Args:
+            path: Image path, directory, glob, or txt list of paths.
+            batch: Batch size.
+            img_size: Target (width, height) for cv2.resize.
+        """
+        self.img_size = img_size
         parent = None
         if isinstance(path, str) and Path(path).suffix == ".txt":  # *.txt file with img/vid/dir on each line
             parent = Path(path).parent
@@ -166,6 +164,7 @@ class LoadImages:
             im0 = cv2.imread(path)  # BGR
             if im0 is None:
                 raise FileNotFoundError(f"Image Not Found {path}")
+            im0 = cv2.resize(im0, self.img_size, interpolation=cv2.INTER_LINEAR)
             paths.append(path)
             imgs.append(im0)
             info.append(f"image {self.count + 1}/{self.nf} {path}: ")
@@ -178,7 +177,8 @@ class LoadImages:
         return math.ceil(self.nf / self.bs)  # number of files
 
 def experimental(model):
-    dataset = LoadImages("data/val_ids.txt", args.batch_size)
+    img_size = (args.img_width, args.img_height)
+    dataset = LoadImages("data/val_ids.txt", args.batch_size, img_size=img_size)
     for _, batch in tqdm(enumerate(dataset), total=len(dataset)):
         # processing
         _, transform_im, _ = batch
@@ -187,14 +187,11 @@ def experimental(model):
         _ = model(batch_tensor)
     print("Done")
 
-def quantization(title='optimize',
-                 model_name='', 
-                ): 
+def quantization():
     print("quantization")
     quant_mode = args.quant_mode
     deploy = args.deploy
     batch_size = args.batch_size
-    subset_len = args.subset_len
     config_file = args.config_file
     target = args.target
 
@@ -207,10 +204,9 @@ def quantization(title='optimize',
     if quant_mode != 'test' and deploy:
         deploy = False
         print(r'Warning: Exporting xmodel needs to be done in quantization test mode, turn off it in this running!')
-    if deploy and (batch_size != 1 or subset_len != 1):
-        print(r'Warning: Exporting xmodel needs batch size to be 1 and only 1 iteration of inference, change them automatically!')
+    if deploy and batch_size != 1:
+        print(r'Warning: Exporting xmodel needs batch size to be 1, changing it automatically!')
         batch_size = 1
-        subset_len = 1
 
     input = torch.randn([batch_size, 3, args.img_height, args.img_width])
 
@@ -245,20 +241,6 @@ def quantization(title='optimize',
 
 
 if __name__ == '__main__':
-
-  file_path = os.path.join(args.model_path)
-  feature_test = ' quantization'
-  # force to merge BN with CONV for better quantization accuracy
-  args.optimize = 1
-  feature_test += ' with optimization'
-  
-  title = args.model_path + feature_test
-
-  print("-------- Start {} test ".format(args.model_path))
-
-  # calibration or evaluation
-  quantization(
-      title=title,
-      model_name=args.model_path)
-
-  print("-------- End of {} test ".format(args.model_path))
+    print("-------- Start {} test --------".format(args.model_path))
+    quantization()
+    print("-------- End of {} test --------".format(args.model_path))

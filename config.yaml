@@ -1,15 +1,15 @@
 # Training Configuration
-# YOLOv26 and YOLOv11 are supported
+# YOLOv26 and YOLOv11 are supported (Detect and OBB)
 training:
   # Model parameters
-  model: "yolo26n.pt"  # e.g. yolo26n.pt (YOLOv26) or yolo11n.pt (YOLOv11)
-  
+  model: "yolo26n.pt"  # e.g. yolo26n.pt (Detect) or yolo26n-obb.pt (OBB); yolo11n.pt for YOLOv11
+
   # Data parameters
-  data: "VOC.yaml"
+  data: "./dataset/data.yaml"
   epochs: 900
   imgsz: 416
   device: 'cuda:0'
-  
+
   # Optimization parameters
   batch: -1  # automatically detect
   workers: 8
@@ -22,14 +22,14 @@ training:
   warmup_epochs: 3.0
   warmup_momentum: 0.8
   warmup_bias_lr: 0.1
-  
+
   # Model parameters
   dropout: 0.0
   val: true
   save: true
   save_period: -1
   project: 'runs'
-  name: 'yolov26n_train'  # e.g. yolo11n_train when using YOLOv11 weights
+  name: 'yolov26n_train'  # e.g. yolo11n_train or yolov26n_obb_train for OBB
   pretrained: true
   freeze: null
   cache: false
@@ -47,18 +47,18 @@ training:
 # Testing Configuration
 testing:
   # Data parameters
-  data: "VOC.yaml"
+  data: "./dataset/data.yaml"
   imgsz: 416
   device: 'cuda:0'   # cpu for CPU, cuda:0 for GPU
 
-  # Model parameters
-  model_path: "./runs/detect/runs/yolov26n_train/weights/best.pt"  # adjust run folder for YOLOv11 (e.g. .../yolo11n_train/...)
-  
+  # Model parameters (update after training)
+  model_path: "./runs/yolov26n_train/weights/best.pt"
+
   # Testing parameters
   batch: 32
   workers: 8
   project: 'runs'
-  name: 'yolov26n_test'  # e.g. yolo11n_test for YOLOv11 runs
+  name: 'yolov26n_test'
   save_txt: true
   save_conf: true
   save_json: true
@@ -76,20 +76,20 @@ testing:
 # Cross-Validation Configuration
 cross_validation:
   # Model parameters
-  model: "yolov8n.pt"  # Model to use for cross-validation
-  
+  model: "yolo26n.pt"
+
   # Data parameters
-  dataset_path: "./dataset/hpd3_320/yolov8"  # Path to the dataset directory
-  data_yaml_path: "./dataset/hpd3_320/yolov8/data.yaml"  # Path to the data.yaml file
-  k_splits: 10  # Number of folds for cross-validation
-  random_state: 42  # Random state for reproducible splits
-  
+  dataset_path: "./dataset"
+  data_yaml_path: "./dataset/data.yaml"
+  k_splits: 10
+  random_state: 42
+
   task: detect
   epochs: 2
-  
+
   patience: 150
   batch: -1
-  imgsz: 640
+  imgsz: 416
   save: true
   save_period: -1
   cache: false
@@ -178,84 +178,76 @@ cross_validation:
   auto_augment: randaugment
   erasing: 0.4
   cfg: null
-  
+
   # Project settings
-  project: 'runs/cross_validation'  # Project directory for results
+  project: 'runs/cross_validation'
 
 # Hyperparameter Tuning Configuration
 hyperparameter_tuning:
   # Model parameters
-  model: "yolov8n.pt"  # Model to use for tuning
-  
+  model: "yolo26n.pt"
+
   # Data parameters
-  data: "./dataset/hpd3_416/yolov8/data.yaml"
+  data: "./dataset/data.yaml"
   epochs: 50
-  
+
   # Tuning parameters
-  iterations: 50  # Number of hyperparameter search iterations (300)
-  
+  iterations: 50
+
   # Search space parameters (ranges for tuning)
   search_space:
-    # Learning rate parameters
-    lr0: [0.00001, 0.1]  # Initial learning rate at the start of training. Lower values provide more stable training but slower convergence
-    lrf: [0.01, 1.0]  # Final learning rate factor as a fraction of lr0. Controls how much the learning rate decreases during training
-    
-    # Optimization parameters
-    momentum: [0.6, 0.98]  # SGD momentum factor. Higher values help maintain consistent gradient direction and can speed up convergence
-    weight_decay: [0.0, 0.001]  # L2 regularization factor to prevent overfitting. Larger values enforce stronger regularization
-    warmup_epochs: [0.0, 5.0]  # Number of epochs for linear learning rate warmup. Helps prevent early training instability
-    warmup_momentum: [0.0, 0.95]  # Initial momentum during warmup phase. Gradually increases to the final momentum value
-    
-    # Loss weights
-    box: [0.02, 0.2]  # Bounding box loss weight in the total loss function. Balances box regression vs classification
-    cls: [0.2, 4.0]  # Classification loss weight in the total loss function. Higher values emphasize correct class prediction
-    
-    # Data augmentation parameters
-    hsv_h: [0.0, 0.1]  # Random hue augmentation range in HSV color space. Helps model generalize across color variations
-    hsv_s: [0.0, 0.9]  # Random saturation augmentation range in HSV space. Simulates different lighting conditions
-    hsv_v: [0.0, 0.9]  # Random value (brightness) augmentation range. Helps model handle different exposure levels
-    degrees: [0.0, 45.0]  # Maximum rotation augmentation in degrees. Helps model become invariant to object orientation
-    translate: [0.0, 0.9]  # Maximum translation augmentation as fraction of image size. Improves robustness to object position
-    scale: [0.0, 0.9]  # Random scaling augmentation range. Helps model detect objects at different sizes
-    shear: [0.0, 10.0]  # Maximum shear augmentation in degrees. Adds perspective-like distortions to training images
-    perspective: [0.0, 0.001]  # Random perspective augmentation range. Simulates different viewing angles
-    flipud: [0.0, 1.0]  # Probability of vertical image flip during training. Useful for overhead/aerial imagery
-    fliplr: [0.0, 1.0]  # Probability of horizontal image flip. Helps model become invariant to object direction
-    mosaic: [0.0, 1.0]  # Probability of using mosaic augmentation, which combines 4 images. Especially useful for small object detection
-    mixup: [0.0, 1.0]  # Probability of using mixup augmentation, which blends two images. Can improve model robustness
-    copy_paste: [0.0, 1.0]  # Probability of using copy-paste augmentation. Helps improve instance segmentation performance
+    lr0: [0.00001, 0.1]
+    lrf: [0.01, 1.0]
+    momentum: [0.6, 0.98]
+    weight_decay: [0.0, 0.001]
+    warmup_epochs: [0.0, 5.0]
+    warmup_momentum: [0.0, 0.95]
+    box: [0.02, 0.2]
+    cls: [0.2, 4.0]
+    hsv_h: [0.0, 0.1]
+    hsv_s: [0.0, 0.9]
+    hsv_v: [0.0, 0.9]
+    degrees: [0.0, 45.0]
+    translate: [0.0, 0.9]
+    scale: [0.0, 0.9]
+    shear: [0.0, 10.0]
+    perspective: [0.0, 0.001]
+    flipud: [0.0, 1.0]
+    fliplr: [0.0, 1.0]
+    mosaic: [0.0, 1.0]
+    mixup: [0.0, 1.0]
+    copy_paste: [0.0, 1.0]
 
 # Benchmark Configuration
 benchmark:
-  # Model parameters
-  model_path: "./models/assets/best.pt"  # Path to the model to benchmark
-  data: "./dataset/hpd3/yolov8/data.yaml"  # Dataset to use for benchmarking
-  imgsz: 640  # Image size for benchmarking
-  half: true  # Use FP16 half-precision inference
-  device: 0  # Device to use (cpu for CPU, cuda:0 for GPU)
-  verbose: true  # Verbose output
-  int8: false  # Use INT8 quantization
-  format: 'onnx' # [ "torchscript", "onnx", "openvino", "engine", "coreml", "saved_model", "pb", "tflite", "edgetpu", "tfjs", "paddle", "mnn", "ncnn", "imx", "rknn"]
+  model_path: "./runs/yolov26n_train/weights/best.pt"
+  data: "./dataset/data.yaml"
+  imgsz: 416
+  half: true
+  device: 0
+  verbose: true
+  int8: false
+  format: 'onnx'
 
 # Global settings
 settings:
-  tensorboard: true 
+  tensorboard: true
 
 # Export configuration
 export:
-  model_path: "./runs/yolov8n_obb_train/weights/best.pt"  # Path to the model to export
-  format: "onnx"  # Export format (tflite tfjs saved_model rknn pb paddle openvino onnx ncnn mnn imx engine edgetpu coreml
-  imgsz: 416  # Image size for export
-  keras: false  # Export to Keras format
-  optimize: false  # Optimize for mobile devices (TorchScript only)
-  half: false  # FP16 quantization
-  int8: false  # INT8 quantization
-  dynamic: false  # Dynamic input sizes
-  simplify: true  # Simplify ONNX model
-  opset: 14  # ONNX opset version
-  workspace: null  # TensorRT workspace size (GB)
-  nms: false  # Include NMS in exported model
-  batch: 1  # Batch size
-  device: None  # Device to use (cpu, 0, etc.)
-  data: "./dataset/hpd2_modified_416_obb/data.yaml"  # Dataset config for INT8 calibration
-  fraction: 1.0  # Fraction of dataset to use for INT8 calibration
+  model_path: "./runs/yolov26n_train/weights/best.pt"
+  format: "onnx"
+  imgsz: 416
+  keras: false
+  optimize: false
+  half: false
+  int8: false
+  dynamic: false
+  simplify: true
+  opset: 14
+  workspace: null
+  nms: false
+  batch: 1
+  device: None
+  data: "./dataset/data.yaml"
+  fraction: 1.0
