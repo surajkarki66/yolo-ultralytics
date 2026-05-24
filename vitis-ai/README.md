@@ -6,6 +6,7 @@ End-to-end flow for deploying **YOLOv26** / **YOLOv11** (Detect and OBB) on AMD 
 2. **Quantization** — calibrate and export `.xmodel` (+ config pickle)
 3. **Compilation** — build device-ready artifacts with `vai_c_xir`
 4. **Evaluation** — post-process and score (ONNX / NPZ paths)
+5. **Inference** (optional) — on-target C++ FPS and realtime demos
 
 > **Environment:** Use the Vitis AI Docker image and `conda activate vitis-ai-pytorch` for quantization and inspection.  
 > **Ultralytics:** The Vitis path expects **`ultralytics==8.4.24`** (see `quantization/requirements.txt`). Root training uses the same version via `requirements.txt`. Patch Ultralytics separately in each Vitis step (see below).
@@ -20,6 +21,9 @@ vitis-ai/
   evaluation/
     Quantized_Model/     # ONNX eval (detect or OBB via --task)
     Compiled_Model/      # FPGA NPZ inference + eval
+  inference/
+    YOLOv26/             # Realtime client/server + video (YOLOv26)
+    YOLOv11/             # C++ FPS + video (YOLOv11 / YOLOv11-OBB)
 ```
 
 ## Quick pipeline
@@ -71,11 +75,18 @@ See [compilation/README.md](compilation/README.md).
 
 Pass the config pickle from quantization to both evaluation paths.
 
+See [evaluation/README.md](evaluation/README.md).
+
+### 4. Run on device (optional)
+
+See [inference/README.md](inference/README.md).
+
 ## Artifact handoff
 
 | From | To | Files |
 |------|-----|--------|
 | `quantization/quantize_result/` | `compilation/model/` | `DetectionModel_int.xmodel`, `OBBModel_int.xmodel` |
 | `quantization/quantize_result/` | `evaluation/*/` | `*_config_no_srd_reg_nc_dfl.pkl` |
+| `compilation/zynq_output/` | `inference/**/model/` | Compiled `.xmodel` for on-target apps |
 
 Rename or copy `quantize_result` after each run if you keep multiple DPU sizes (see `quantization/run_compression.sh`).

@@ -4,7 +4,7 @@ This repository provides an end-to-end workflow for YOLO model development and d
 
 - dataset checks and visualization
 - training, testing, tuning, benchmark, and export
-- Vitis AI inspection, quantization, compilation, and evaluation for Detect and OBB pipelines
+- Vitis AI inspection, quantization, compilation, evaluation, and on-target inference for Detect and OBB pipelines
 
 The main CLI entrypoint is `main.py`.
 
@@ -61,7 +61,7 @@ python3 main.py export
 - `custom_layers/` — DPU-friendly `conv.py` / `block.py` patched into Ultralytics (root `patch_ultralytics.py`)
 - `scripts/` — train, test, tune, export, benchmark, cross-validation (via `main.py`)
 - `config.yaml` — paths and hyperparameters for `main.py` commands
-- `vitis-ai/` — inspection, quantization, compilation, and evaluation for Detect and OBB pipelines  
+- `vitis-ai/` — inspection, quantization, compilation, evaluation, and on-target inference  
   Start here: [vitis-ai/README.md](vitis-ai/README.md)
 
 ## Vitis AI High-Level Flow
@@ -70,6 +70,7 @@ python3 main.py export
 2. Quantize model in `vitis-ai/quantization/`
 3. Compile in `vitis-ai/compilation/`
 4. Evaluate in `vitis-ai/evaluation/Quantized_Model/` or `vitis-ai/evaluation/Compiled_Model/`
+5. Deploy (optional) in `vitis-ai/inference/` (YOLOv26 or YOLOv11 paths)
 
 > **Note:** FPGA deployment through Vitis AI in this repository requires `ultralytics==8.4.24`.  
 > This is a strict dependency for the supported quantization/patching workflow.
@@ -169,6 +170,17 @@ Details: [vitis-ai/compilation/README.md](vitis-ai/compilation/README.md)
 Pass the `*_config_no_srd_reg_nc_dfl.pkl` from quantization via `--quant-meta`.
 
 Details: [vitis-ai/evaluation/README.md](vitis-ai/evaluation/README.md)
+
+### Phase 5: On-target inference (optional)
+
+Copy compiled `.xmodel` and config pickle to `vitis-ai/inference/**/model/`.
+
+| Variant | Path |
+|---------|------|
+| YOLOv26 detect / OBB video | `vitis-ai/inference/YOLOv26/` |
+| YOLOv11 C++ FPS + video | `vitis-ai/inference/YOLOv11/` |
+
+Details: [vitis-ai/inference/README.md](vitis-ai/inference/README.md)
 
 ## Dataset Layout
 
