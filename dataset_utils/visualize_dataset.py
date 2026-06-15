@@ -1,186 +1,277 @@
-import os
+"""
+Visualize sample images with YOLO bbox and OBB annotations.
+"""
+
+import logging
 import random
 import cv2
 import numpy as np
-from pathlib import Path
-from tqdm import tqdm
-import shutil
 import supervision as sv
+
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from tqdm import tqdm
+
+from dataset_utils.common import (
+    DATASET_SPLITS,
+    get_class_label,
+    list_image_paths,
+    load_class_names,
+)
+
+logger = logging.getLogger(__name__)
+
+OBB_COLOR = (0, 255, 0)
+OBB_THICKNESS = 2
+
 
 @dataclass
-class Annotation:
-    """Class to store annotation data"""
+class ObbedAnnotation:
+    """Oriented bounding box in pixel coordinates."""
     class_id: int
-    x_center: float
-    y_center: float
-    width: float
-    height: float
+    points: np.ndarray  # shape (4, 2), int32
+
 
 class SampleImageSaver:
-    def __init__(self, base_dir: Path, output_dir: Path, num_samples: int = 5):
+    def __init__(
+        self,
+        base_dir: Path,
+        output_dir: Path,
+        num_samples: int = 5,
+        class_names: Optional[Dict[int, str]] = None,
+    ):
         """
-        Initialize the SampleImageSaver
+        Initialize the SampleImageSaver.
 
         Args:
-            base_dir (Path): Base directory containing the dataset
-            output_dir (Path): Directory to save output visualizations
-            num_samples (int): Number of samples to save from each set
+            base_dir: Base directory containing the dataset.
+            output_dir: Directory to save output visualizations.
+            num_samples: Number of samples to save from each split.
+            class_names: Optional mapping of class id to display name.
         """
-        self.base_dir = base_dir
-        self.output_dir = output_dir
+        self.base_dir = Path(base_dir)
+        self.output_dir = Path(output_dir)
         self.num_samples = num_samples
-        self.subdirs = ['train', 'valid', 'test'] # Assuming these subdirectories exist
-        self.image_extensions = {'.jpg', '.jpeg', '.png'}
+        self.class_names = class_names if class_names is not None else load_class_names(self.base_dir)
+        self.subdirs = list(DATASET_SPLITS)
 
-        # Initialize supervision annotators with correct parameters
-        self.box_annotator = sv.BoxAnnotator(
-            thickness=2,
-        )
+        self.box_annotator = sv.BoxAnnotator(thickness=2)
+        self.label_annotator = sv.LabelAnnotator()
 
-        # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Saving sample images to '{self.output_dir}'")
+        logger.info("Saving sample images to '%s'", self.output_dir)
 
-    def get_random_samples(self, subdir):
-        """Get random sample images from a directory"""
+    def get_random_samples(self, subdir: str) -> List[Path]:
+        """Get random sample images from a split directory."""
         images_dir = self.base_dir / subdir / 'images'
         labels_dir = self.base_dir / subdir / 'labels'
 
         if not images_dir.is_dir() or not labels_dir.is_dir():
-            print(f"Warning: {images_dir} or {labels_dir} not found. Skipping {subdir}.")
+            logger.warning(
+                "%s or %s not found. Skipping %s.",
+                images_dir,
+                labels_dir,
+                subdir,
+            )
             return []
 
-        # Get all image files
-        image_files = []
-        for ext in self.image_extensions:
-            image_files.extend(list(images_dir.glob(f'*{ext}')))
-
-        # Get random samples
+        image_files = list_image_paths(images_dir)
         if len(image_files) > self.num_samples:
             return random.sample(image_files, self.num_samples)
         return image_files
 
-    def read_annotations(self, label_path: Path, img_width: int, img_height: int):
-        """Read annotations from YOLO format label file and convert to supervision Detections"""
-        detections_list = []
+    def read_annotations(
+        self,
+        label_path: Path,
+        img_width: int,
+        img_height: int,
+    ) -> Tuple[Optional[sv.Detections], List[ObbedAnnotation]]:
+        """Read YOLO bbox and OBB labels; return supervision Detections and OBB polygons."""
+        detections_list: List[list] = []
+        obb_list: List[ObbedAnnotation] = []
+
         try:
-            with open(label_path, 'r') as f:
+            with open(label_path, 'r', encoding='utf-8') as f:
                 for line in f:
-                    # Parse YOLO format (class_id, x_center, y_center, width, height)
                     parts = line.strip().split()
+                    if not parts:
+                        continue
+
                     if len(parts) == 5:
-                        class_id, x_center, y_center, w, h = map(float, parts)
+                        try:
+                            class_id, x_center, y_center, w, h = map(float, parts)
+                        except ValueError:
+                            logger.warning(
+                                "Invalid bbox label values in %s: %s",
+                                label_path,
+                                line.strip(),
+                            )
+                            continue
 
-                        # Convert normalized coordinates to pixel coordinates (xyxy format)
-                        x1 = int((x_center - w/2) * img_width)
-                        y1 = int((y_center - h/2) * img_height)
-                        x2 = int((x_center + w/2) * img_width)
-                        y2 = int((y_center + h/2) * img_height)
+                        x1 = int((x_center - w / 2) * img_width)
+                        y1 = int((y_center - h / 2) * img_height)
+                        x2 = int((x_center + w / 2) * img_width)
+                        y2 = int((y_center + h / 2) * img_height)
 
-                        # Append detection box coordinates and class_id
+                        x1 = max(0, min(x1, img_width - 1))
+                        y1 = max(0, min(y1, img_height - 1))
+                        x2 = max(0, min(x2, img_width - 1))
+                        y2 = max(0, min(y2, img_height - 1))
+
+                        if x2 <= x1 or y2 <= y1:
+                            continue
+
                         detections_list.append([x1, y1, x2, y2, int(class_id)])
+                        continue
+
+                    if len(parts) == 9:
+                        try:
+                            class_id = int(float(parts[0]))
+                            coords = list(map(float, parts[1:]))
+                        except ValueError:
+                            logger.warning(
+                                "Invalid OBB label values in %s: %s",
+                                label_path,
+                                line.strip(),
+                            )
+                            continue
+
+                        points = np.array(
+                            [
+                                [int(coords[i] * img_width), int(coords[i + 1] * img_height)]
+                                for i in range(0, 8, 2)
+                            ],
+                            dtype=np.int32,
+                        )
+                        obb_list.append(ObbedAnnotation(class_id=class_id, points=points))
+                        continue
+
+                    logger.warning(
+                        "Unsupported label line (%d fields) in %s: %s",
+                        len(parts),
+                        label_path,
+                        line.strip(),
+                    )
 
         except Exception as e:
-            print(f"Error processing annotations for {label_path}: {e}")
-            return None
+            logger.error("Error processing annotations for %s: %s", label_path, e)
+            return None, []
 
-        if not detections_list:
-            return None # Return None if no annotations were read
+        detections_sv = None
+        if detections_list:
+            detections_np = np.array(detections_list)
+            detections_sv = sv.Detections(
+                xyxy=detections_np[:, :4],
+                confidence=np.array([1.0] * len(detections_list)),
+                class_id=detections_np[:, 4].astype(int),
+            )
 
-        # Convert list to numpy array for supervision Detections
-        detections_np = np.array(detections_list)
-        xyxy = detections_np[:, :4]
-        class_ids = detections_np[:, 4].astype(int)
+        return detections_sv, obb_list
 
-        # Create supervision Detections object
-        detections_sv = sv.Detections(
-            xyxy=xyxy,
-            confidence=np.array([1.0] * len(detections_list)),  # Assuming confidence of 1.0 for ground truth
-            class_id=class_ids
-        )
+    def _draw_obb(self, img: np.ndarray, obb_list: List[ObbedAnnotation]) -> np.ndarray:
+        """Draw oriented bounding boxes on the image."""
+        for obb in obb_list:
+            cv2.polylines(
+                img,
+                [obb.points],
+                isClosed=True,
+                color=OBB_COLOR,
+                thickness=OBB_THICKNESS,
+            )
+        return img
 
-        return detections_sv
+    def _detection_labels(self, detections: sv.Detections) -> List[str]:
+        if detections.class_id is None:
+            return []
+        return [get_class_label(self.class_names, int(cid)) for cid in detections.class_id]
 
-    def draw_annotations(self, image_path: Path, label_path: Path):
-        """Draw bounding box annotations on the image using supervision"""
-        # Read image
+    def draw_annotations(self, image_path: Path, label_path: Path) -> Optional[np.ndarray]:
+        """Draw bounding box and OBB annotations on the image."""
         img = cv2.imread(str(image_path))
         if img is None:
-            print(f"Error reading image: {image_path}")
+            logger.error("Error reading image: %s", image_path)
             return None
 
         height, width = img.shape[:2]
+        detections, obb_list = self.read_annotations(label_path, width, height)
 
-        # Read and process annotations
-        detections = self.read_annotations(label_path, width, height)
+        has_bbox = detections is not None and len(detections) > 0
+        has_obb = len(obb_list) > 0
 
-        if detections is None or len(detections) == 0:
-             print(f"No valid annotations found for {image_path.name}. Skipping drawing.")
-             # Return original image if no detections to draw
-             return img.copy()
+        if not has_bbox and not has_obb:
+            logger.warning("No valid annotations found for %s.", image_path.name)
+            return img.copy()
 
+        annotated_img = img.copy()
 
-        # Draw annotations using supervision's BoxAnnotator
+        if has_bbox:
+            annotated_img = self.box_annotator.annotate(
+                scene=annotated_img,
+                detections=detections,
+            )
+            labels = self._detection_labels(detections)
+            if labels:
+                annotated_img = self.label_annotator.annotate(
+                    scene=annotated_img,
+                    detections=detections,
+                    labels=labels,
+                )
 
-        annotated_img = self.box_annotator.annotate(
-            scene=img.copy(),
-            detections=detections,
-        )
+        if has_obb:
+            annotated_img = self._draw_obb(annotated_img, obb_list)
 
         return annotated_img
 
-    def save_samples(self):
-        """Save annotated sample images from each set"""
-        # Assuming output_dir is already created in __init__
-
+    def save_samples(self) -> None:
+        """Save annotated sample images from each split."""
         for subdir in self.subdirs:
-            print(f"\nProcessing {subdir} set...")
+            logger.info("Processing %s set...", subdir)
 
-            # Create subdirectory for this set within the main output directory
             set_output_dir = self.output_dir / subdir
             set_output_dir.mkdir(exist_ok=True)
 
-            # Get random samples
             sample_images = self.get_random_samples(subdir)
-
             if not sample_images:
-                print(f"No images found in {self.base_dir / subdir}. Skipping.")
+                logger.warning("No images found in %s. Skipping.", self.base_dir / subdir)
                 continue
 
-            # Process each sample
             for img_path in tqdm(sample_images, desc=f"Saving {subdir} samples"):
-                # Get corresponding label file
                 label_path = self.base_dir / subdir / 'labels' / f"{img_path.stem}.txt"
 
                 if not label_path.exists():
-                    print(f"Warning: No label file found for {img_path.name} in {self.base_dir / subdir / 'labels'}")
-                    # Optionally save the image without annotations
-                    # shutil.copy(img_path, set_output_dir)
+                    logger.warning(
+                        "No label file found for %s in %s",
+                        img_path.name,
+                        self.base_dir / subdir / 'labels',
+                    )
                     continue
 
-                # Draw annotations
                 annotated_img = self.draw_annotations(img_path, label_path)
-
                 if annotated_img is not None:
-                    # Save the annotated image
                     output_path = set_output_dir / f"{img_path.stem}_annotated{img_path.suffix}"
                     cv2.imwrite(str(output_path), annotated_img)
 
+
 def visualize_sample_annotated_dataset(
-    data_dir: Path, output_dir: Path, num_samples: int = 10, classes: dict = None
+    data_dir: Path,
+    output_dir: Path,
+    num_samples: int = 10,
+    classes: Optional[Dict[int, str]] = None,
 ) -> None:
     """
-    Visualize a sample of annotated images from the dataset using the SampleImageSaver.
+    Visualize a sample of annotated images from the dataset.
 
     Args:
-        data_dir (Path): Path to the dataset directory.
-        output_dir (Path): Path to save output visualizations.
-        num_samples (int): Number of samples to visualize (default: 10).
-        classes (dict): Optional dictionary mapping class IDs to names (not used by current SampleImageSaver).
+        data_dir: Path to the dataset directory.
+        output_dir: Path to save output visualizations.
+        num_samples: Number of samples to visualize per split.
+        classes: Optional mapping of class id to name; loads from data.yaml if omitted.
     """
-    # Create an instance of SampleImageSaver and run the saving process
-    # Note: The SampleImageSaver expects the dataset structure like data_dir/train, data_dir/valid, data_dir/test
-    # If your dataset structure is different, you might need to adjust SampleImageSaver accordingly.
-    saver = SampleImageSaver(base_dir=data_dir, output_dir=output_dir, num_samples=num_samples)
-    saver.save_samples() 
+    saver = SampleImageSaver(
+        base_dir=data_dir,
+        output_dir=output_dir,
+        num_samples=num_samples,
+        class_names=classes,
+    )
+    saver.save_samples()

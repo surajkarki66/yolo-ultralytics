@@ -3,15 +3,19 @@
 import argparse
 import sys
 import logging
+
 from pathlib import Path
 
-from models.yolo import train_model, test_model
-from models.yolo.benchmark import benchmark_model
-from models.yolo.export import export_model
-from models.yolo.hyperparameter_tuning import tune_model
 from dataset_utils.eda import perform_eda
 from dataset_utils.visualize_dataset import visualize_sample_annotated_dataset
-from models.yolo.cross_validation import run_cross_validation
+from scripts import (
+    benchmark_model,
+    export_model,
+    run_cross_validation,
+    test_model,
+    train_model,
+    tune_model,
+)
 
 
 # Configure logging
@@ -20,6 +24,20 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _run_action(action_name: str, func) -> bool:
+    """Run a command action with consistent logging and error handling."""
+    logger.info(f"=== Starting {action_name} ===")
+    try:
+        result = func()
+        if result is not None:
+            logger.info(result)
+        logger.info(f"{action_name} completed successfully!")
+        return True
+    except Exception:
+        logger.exception(f"Error during {action_name.lower()}")
+        return False
 
 def setup_parser():
     """Setup command line argument parser with subcommands"""
@@ -120,76 +138,27 @@ def setup_parser():
 
 def run_training():
     """Run training using the imported train module"""
-    logger.info("=== Starting Training ===")
-    try:
-        # Train using the imported train module
-        train_model()
-        logger.info("Training completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during training: {str(e)}")
-        return False
+    return _run_action("Training", train_model)
 
 def run_testing():
     """Run testing using the imported test module"""
-    logger.info("=== Starting Testing ===")
-    try:   
-        # Test using the imported test module
-        test_model()
-        logger.info("Testing completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during testing: {str(e)}")
-        return False
+    return _run_action("Testing", test_model)
 
 def run_cross_validation_cmd():
     """Run cross-validation using the imported cross_validation module"""
-    logger.info("=== Starting Cross-Validation ===")
-    try:
-        # Run cross-validation using the imported module
-        results = run_cross_validation()
-        print(results)
-        logger.info("Cross-validation completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during cross-validation: {str(e)}")
-        return False
+    return _run_action("Cross-Validation", run_cross_validation)
 
 def run_benchmark():
     """Run benchmarking using the imported benchmark module"""
-    logger.info("=== Starting Benchmarking ===")
-    try:
-        # Benchmark using the imported benchmark module
-        benchmark_model()
-        logger.info("Benchmarking completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during benchmarking: {str(e)}")
-        return False
+    return _run_action("Benchmarking", benchmark_model)
 
 def run_export():
     """Run model export using the imported export module"""
-    logger.info("=== Starting Model Export ===")
-    try:
-        # Export using the imported export module
-        export_model()
-        logger.info("Model export completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during export: {str(e)}")
-        return False
+    return _run_action("Model Export", export_model)
 
 def run_tuning():
     """Run hyperparameter tuning using the imported tune module"""
-    logger.info("=== Starting Hyperparameter Tuning ===")
-    try:
-        # Tune using the imported tune module
-        tune_model()
-        logger.info("Hyperparameter tuning completed successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error during hyperparameter tuning: {str(e)}")
-        return False
+    return _run_action("Hyperparameter Tuning", tune_model)
 
 def main():
     """Main function"""
@@ -217,8 +186,11 @@ def main():
             if not data_dir.exists():
                 logger.error(f"Dataset directory {data_dir} does not exist.")
                 sys.exit(1)
-                
-            args.func(data_dir, output_dir)
+
+            if args.action == 'visualize':
+                args.func(data_dir, output_dir, num_samples=args.num_samples)
+            else:
+                args.func(data_dir, output_dir)
             success = True
             
         sys.exit(0 if success else 1)

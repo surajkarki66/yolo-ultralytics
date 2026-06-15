@@ -740,9 +740,11 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
     import pickle
 
     with open(args.quant_meta, "rb") as f:
-        no, stride, reg_max, nc, _dfl = pickle.load(f)
+        cfg = pickle.load(f)
+        no, stride, reg_max, nc, _dfl = cfg
+        print(cfg)
 
-    args.reg_max = int(reg_max)
+    args.reg_max = 1
     args.nc = int(nc)
 
     if isinstance(stride, torch.Tensor):
@@ -759,9 +761,9 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate YOLOv26 FPGA predictions.npz using YOLOv26 decode + mAP.")
+    parser = argparse.ArgumentParser(description="Evaluate YOLOv26 / YOLOv11 FPGA predictions.npz using the same decode + mAP.")
     parser.add_argument("--predictions-npz", type=str, required=True, help="Path to predictions.npz from FPGA inference.")
-    parser.add_argument("--task", type=str, default="obb", choices=("detect", "obb"), help="Which YOLOv26 head to evaluate.")
+    parser.add_argument("--task", type=str, default="obb", choices=("detect", "obb"), help="Which head to evaluate (YOLOv26 / YOLOv11 detect or OBB).")
     parser.add_argument("--data", type=str, required=True, help="Dataset YAML for class names and validation images.")
     parser.add_argument("--quant-meta", type=str, default=None, help="Path to quantization metadata pkl (no/stride/reg_max/nc/dfl).")
     parser.add_argument("--imgsz", type=int, default=416, help="Inference image size used on FPGA.")

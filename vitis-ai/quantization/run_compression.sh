@@ -1,14 +1,14 @@
 ## B4096
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B4096
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096 --quant_mode test --deploy
 #sleep 20
@@ -17,15 +17,15 @@
 
 ## B3136
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B3136
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136 --quant_mode test --deploy
 #sleep 20
@@ -34,15 +34,15 @@
 
 ## B2304
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B2304
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304 --quant_mode test --deploy
 #sleep 20
@@ -51,15 +51,15 @@
 
 ## B1600
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B1600
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1600 --quant_mode test --deploy
 #sleep 20
@@ -68,15 +68,15 @@
 
 ## B1152
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B1152
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1152 --quant_mode test --deploy
 #sleep 20
@@ -85,15 +85,15 @@
 
 ## B1024
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B1024
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B1024 --quant_mode test --deploy
 #sleep 20
@@ -102,15 +102,15 @@
 
 ## B800
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B800
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800 --quant_mode test --deploy
 #sleep 20
@@ -119,15 +119,15 @@
 
 ## B512
 
-## YOLOv26
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode calib --inspect
+## YOLOv26 / YOLOv11
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode test --deploy
 #sleep 20
 #mv quantize_result quantize_result_yolov26n_416_B512
 
-## YOLOv26-OBB
-#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode calib --inspect
+## YOLOv26-OBB / YOLOv11-OBB
+#python vai_q_yolo.py  --model_path "best.pt" --batch_size 16 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode calib
 #sleep 20
 #python vai_q_yolo.py --model_path "best.pt" --batch_size 1 --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512 --quant_mode test --deploy
 #sleep 20

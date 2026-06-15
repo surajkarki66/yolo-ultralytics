@@ -16,6 +16,7 @@ __all__ = (
     "Segment",
     "Segment26",
     "OBB",
+    "OBB26",
     "Pose",
     "Pose26",
     "Classify",
@@ -242,8 +243,8 @@ class OBB(Detect):
     YOLOv26 OBB head — angle = (sigmoid - 0.25) * π.
  
     DPU output (export=True) — 6 tensors:
-      outputs[0..2] → box+cls per level        (B, 4*reg_max+nc, Hi, Wi)
-      outputs[3..5] → normalised angle per level (B, ne,           Hi, Wi)
+      outputs[0..2] → box+cls per level       (B, 4*reg_max+nc, Hi, Wi)
+      outputs[3..5] → raw angle per level     (B, ne,           Hi, Wi)  ← no sigmoid
     """
  
     def __init__(self, nc: int = 80, ne: int = 1,
@@ -259,10 +260,10 @@ class OBB(Detect):
     def forward(self, x: list[torch.Tensor]):
         bs = x[0].shape[0]
  
-        # Per-level angle in spatial form (B, ne, Hi, Wi) — gives 3 separate DPU outputs
+        # Per-level raw logits in spatial form
         angle_per_level = [self.cv4[i](x[i]) for i in range(self.nl)]
  
-        # Concatenated normalised angle — used internally by decode_bboxes
+        # Concatenated + normalised angle for decode_bboxes only (not exported)
         angle_cat  = torch.cat(
             [a.view(bs, self.ne, -1) for a in angle_per_level], dim=2
         )
@@ -273,11 +274,8 @@ class OBB(Detect):
  
         if self.training or self.export:
             # 6 outputs: [box+cls_l0, box+cls_l1, box+cls_l2,
-            #              angle_l0,   angle_l1,   angle_l2]  ← normalised
-            angle_per_level = [
-                (a.sigmoid() - 0.25) * math.pi for a in angle_per_level
-            ]
-            return x + angle_per_level
+            #              angle_raw_l0, angle_raw_l1, angle_raw_l2]  ← raw logits, no sigmoid
+            return x + angle_per_level          # ← was: (a.sigmoid() - 0.25) * pi
  
         shape = x[0].shape
         if self.dynamic or self.shape != shape:
