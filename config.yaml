@@ -43,6 +43,13 @@ training:
   deterministic: true
   exist_ok: false
 
+  # Data augmentation (0.0 disables each component)
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
+  mixup: 0.0
+  copy_paste: 0.0
+
 # Testing Configuration
 testing:
   # Data parameters
@@ -158,9 +165,9 @@ cross_validation:
   pose: 12.0
   kobj: 1.0
   nbs: 64
-  hsv_h: 0.015
-  hsv_s: 0.7
-  hsv_v: 0.4
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
   degrees: 0.0
   translate: 0.1
   scale: 0.5
