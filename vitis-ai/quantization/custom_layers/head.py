@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License
 from __future__ import annotations
 
+import copy
 import math
 
 import torch
@@ -29,24 +30,29 @@ __all__ = (
 
 class Detect(nn.Module):
     """
-    YOLOv26 Detect head — Only For Vitis AI DPU export
+    YOLOv26 Detect head for Vitis AI DPU export.
+
+    Supports end2end (NMS-free) one-to-one heads used by YOLOv26 (reg_max=1, end2end=True).
+    DPU export returns raw one2one logits per FPN level; decode and post-processing run on CPU.
     """
 
     dynamic = False
-    export  = True
-    shape   = None
+    export = True
+    max_det = 300
+    agnostic_nms = False
+    shape = None
     anchors = torch.empty(0)
     strides = torch.empty(0)
-    legacy  = False
-    max_det = 300
+    legacy = False
+    xyxy = False
 
-    def __init__(self, nc: int = 80, reg_max: int = 16, ch: tuple = ()):
+    def __init__(self, nc: int = 80, reg_max: int = 16, end2end: bool = False, ch: tuple = ()):
         super().__init__()
-        self.nc      = nc
-        self.nl      = len(ch)
+        self.nc = nc
+        self.nl = len(ch)
         self.reg_max = reg_max
-        self.no      = nc + reg_max * 4
-        self.stride  = torch.zeros(self.nl)
+        self.no = nc + reg_max * 4
+        self.stride = torch.zeros(self.nl)
 
         c2 = max(16, ch[0] // 4, reg_max * 4)
         c3 = max(ch[0], min(nc, 100))
@@ -64,7 +70,7 @@ class Detect(nn.Module):
         else:
             self.cv3 = nn.ModuleList(
                 nn.Sequential(
-                    nn.Sequential(DWConv(x,  x,  3), Conv(x,  c3, 1)),
+                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
                     nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
                     nn.Conv2d(c3, nc, 1),
                 )
@@ -73,74 +79,139 @@ class Detect(nn.Module):
 
         self.dfl = DFL(reg_max) if reg_max > 1 else nn.Identity()
 
-    def forward(self, x: list[torch.Tensor]) -> list[torch.Tensor] | torch.Tensor:
-        """
-        """
+        if end2end:
+            self.one2one_cv2 = copy.deepcopy(self.cv2)
+            self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+    @property
+    def one2many(self):
+        return dict(box_head=self.cv2, cls_head=self.cv3)
+
+    @property
+    def one2one(self):
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
+
+    @property
+    def end2end(self):
+        return getattr(self, "_end2end", True) and hasattr(self, "one2one_cv2")
+
+    @end2end.setter
+    def end2end(self, value):
+        self._end2end = value
+
+    def _active_head(self) -> dict:
+        if self.end2end and hasattr(self, "one2one_cv2"):
+            return self.one2one
+        return self.one2many
+
+    def forward_head(
+        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None
+    ) -> dict[str, torch.Tensor]:
+        if box_head is None or cls_head is None:
+            return {}
+        bs = x[0].shape[0]
+        boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+        return dict(boxes=boxes, scores=scores, feats=x)
+
+    def _export_raw(self, x: list[torch.Tensor], head: dict) -> list[torch.Tensor]:
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+            x[i] = torch.cat((head["box_head"][i](x[i]), head["cls_head"][i](x[i])), dim=1)
+        return x
 
-        # Output per level: (B, 4*reg_max + nc, H_i, W_i)
-        if self.training or self.export:
-            return x
+    def forward(self, x: list[torch.Tensor]) -> list[torch.Tensor] | torch.Tensor | tuple:
+        preds = self.forward_head(x, **self.one2many)
+        if self.end2end:
+            x_detach = [xi.detach() for xi in x]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
 
-        shape = x[0].shape
+        if self.training:
+            return preds
+
+        active = self._active_head()
+        if self.export:
+            return self._export_raw([xi for xi in x], active)
+
+        infer_preds = preds["one2one"] if self.end2end else preds
+        y = self._inference(infer_preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return (y, preds)
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        dbox = self._get_decode_boxes(x)
+        return torch.cat((dbox, x["scores"].sigmoid()), 1)
+
+    def _get_decode_boxes(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        shape = x["feats"][0].shape
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (
-                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+                a.transpose(0, 1) for a in make_anchors(x["feats"], self.stride, 0.5)
             )
             self.shape = shape
+        dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
+        return dbox
 
-        x_cat        = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
-        box, cls     = x_cat.split((self.reg_max * 4, self.nc), dim=1)
-        dbox         = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-        y            = torch.cat((dbox, cls.sigmoid()), dim=1)   # (B, 4+nc, 8400)
-
-        return self._topk(y)
-
-    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
-        return dist2bbox(bboxes, anchors, xywh=False, dim=1)
-
-    def _topk(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        NMS-free top-k selection.
-        Input:  (B, 4+nc, total_anchors)
-        Output: (B, max_det, 6)  [x1, y1, x2, y2, confidence, class_index]
-        """
-        boxes            = y[:, :4, :]
-        scores           = y[:, 4:,  :]
-        conf, cls_idx    = scores.max(dim=1)
-        k                = min(self.max_det, conf.shape[1])
-        topk_conf, idx   = conf.topk(k, dim=1)
-        topk_boxes       = boxes.permute(0, 2, 1).gather(
-                               1, idx.unsqueeze(-1).expand(-1, -1, 4))
-        topk_cls         = cls_idx.gather(1, idx).float()
-        return torch.cat(
-            [topk_boxes, topk_conf.unsqueeze(-1), topk_cls.unsqueeze(-1)], dim=-1
+    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor, xywh: bool = True) -> torch.Tensor:
+        return dist2bbox(
+            bboxes,
+            anchors,
+            xywh=xywh and not self.end2end and not self.xyxy,
+            dim=1,
         )
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        boxes, scores = preds.split([4, self.nc], dim=-1)
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        return torch.cat([boxes, scores, conf], dim=-1)
+
+    def get_topk_index(
+        self, scores: torch.Tensor, max_det: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size, anchors, nc = scores.shape
+        k = max_det if self.export else min(max_det, anchors)
+        if self.agnostic_nms:
+            scores, labels = scores.max(dim=-1, keepdim=True)
+            scores, indices = scores.topk(k, dim=1)
+            labels = labels.gather(1, indices)
+            return scores, labels, indices
+        ori_index = scores.max(dim=-1)[0].topk(k)[1].unsqueeze(-1)
+        scores = scores.gather(dim=1, index=ori_index.repeat(1, 1, nc))
+        scores, index = scores.flatten(1).topk(k)
+        idx = ori_index[torch.arange(batch_size)[..., None], index // nc]
+        return scores[..., None], (index % nc)[..., None].float(), idx
+
+    def fuse(self) -> None:
+        """Remove one2many heads; keep one2one for inference / DPU export."""
+        self.cv2 = self.cv3 = None
+
+    def bias_init(self):
+        for i, (a, b) in enumerate(zip(self.one2many["box_head"], self.one2many["cls_head"])):
+            a[-1].bias.data[:] = 2.0
+            b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+        if self.end2end:
+            for i, (a, b) in enumerate(zip(self.one2one["box_head"], self.one2one["cls_head"])):
+                a[-1].bias.data[:] = 2.0
+                b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
 
     def _topk_with_extra(
         self, y: torch.Tensor, extra: torch.Tensor, extra_dim: int
     ) -> torch.Tensor:
-        """topk applied to detections + an aligned extra tensor (mc / angle / kpts)."""
-        boxes            = y[:, :4, :]
-        scores           = y[:, 4:,  :]
-        conf, cls_idx    = scores.max(dim=1)
-        k                = min(self.max_det, conf.shape[1])
-        topk_conf, idx   = conf.topk(k, dim=1)
-        topk_boxes       = boxes.permute(0, 2, 1).gather(
-                               1, idx.unsqueeze(-1).expand(-1, -1, 4))
-        topk_cls         = cls_idx.gather(1, idx).float()
-        topk_extra       = extra.permute(0, 2, 1).gather(
-                               1, idx.unsqueeze(-1).expand(-1, -1, extra_dim))
+        """NMS-free top-k with aligned extra fields (masks, angles, keypoints)."""
+        boxes = y[:, :4, :]
+        scores = y[:, 4:, :]
+        conf, cls_idx = scores.max(dim=1)
+        k = min(self.max_det, conf.shape[1])
+        topk_conf, idx = conf.topk(k, dim=1)
+        topk_boxes = boxes.permute(0, 2, 1).gather(1, idx.unsqueeze(-1).expand(-1, -1, 4))
+        topk_cls = cls_idx.gather(1, idx).float()
+        topk_extra = extra.permute(0, 2, 1).gather(1, idx.unsqueeze(-1).expand(-1, -1, extra_dim))
         return torch.cat(
             [topk_boxes, topk_conf.unsqueeze(-1), topk_cls.unsqueeze(-1), topk_extra],
             dim=-1,
         )
-
-    def bias_init(self):
-        for a, b, s in zip(self.cv2, self.cv3, self.stride):
-            a[-1].bias.data[:] = 1.0
-            b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / s) ** 2)
 
 
 # ============================================================================
@@ -151,10 +222,10 @@ class Segment(Detect):
     """YOLOv26 Segment head."""
 
     def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256,
-                 reg_max: int = 16, ch: tuple = ()):
-        super().__init__(nc, reg_max, ch)
-        self.nm    = nm
-        self.npr   = npr
+                 reg_max: int = 16, end2end: bool = False, ch: tuple = ()):
+        super().__init__(nc, reg_max, end2end, ch)
+        self.nm = nm
+        self.npr = npr
         self.proto = Proto(ch[0], npr, nm)
 
         c4 = max(ch[0] // 4, nm)
@@ -162,34 +233,34 @@ class Segment(Detect):
             nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, nm, 1))
             for x in ch
         )
+        if end2end:
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
 
     def forward(self, x: list[torch.Tensor]):
-        bs    = x[0].shape[0]
+        bs = x[0].shape[0]
         proto = self.proto(x[0])
-        mc    = torch.cat(
-            [self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
+        head = self._active_head()
+        mask_head = self.one2one_cv4 if self.end2end and hasattr(self, "one2one_cv4") else self.cv4
+        mc = torch.cat(
+            [mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
         )
 
-        for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+        detect_out = self._export_raw([xi for xi in x], head)
 
         if self.training or self.export:
-            # training → (x_list, mc, proto)
-            # export   → (x_list, mc, proto)  — DPU sees x_list + mc
-            return x, mc, proto
+            return detect_out, mc, proto
 
-        # normal inference
-        shape = x[0].shape
+        shape = detect_out[0].shape
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (
-                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+                a.transpose(0, 1) for a in make_anchors(detect_out, self.stride, 0.5)
             )
             self.shape = shape
 
-        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in detect_out], dim=2)
         box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
-        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+        dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y = torch.cat((dbox, cls.sigmoid()), dim=1)
 
         return self._topk_with_extra(y, mc, self.nm), proto
 
@@ -202,145 +273,153 @@ class Segment26(Segment):
     """YOLOv26 Segment26 head with Proto26 multi-scale mask generator."""
 
     def __init__(self, nc: int = 80, nm: int = 32, npr: int = 256,
-                 reg_max: int = 16, ch: tuple = ()):
-        super().__init__(nc, nm, npr, reg_max, ch)
+                 reg_max: int = 16, end2end: bool = False, ch: tuple = ()):
+        super().__init__(nc, nm, npr, reg_max, end2end, ch)
         self.proto = Proto26(ch, npr, nm, nc)
 
     def forward(self, x: list[torch.Tensor]):
-        bs      = x[0].shape[0]
-        x_clone = [xi.clone() for xi in x]   # Proto26 needs original features
-        proto   = self.proto(x_clone)
-        mc      = torch.cat(
-            [self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
+        bs = x[0].shape[0]
+        x_clone = [xi.clone() for xi in x]
+        proto = self.proto(x_clone)
+        head = self._active_head()
+        mask_head = self.one2one_cv4 if self.end2end and hasattr(self, "one2one_cv4") else self.cv4
+        mc = torch.cat(
+            [mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], dim=2
         )
 
-        for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
+        detect_out = self._export_raw([xi for xi in x], head)
 
         if self.training or self.export:
-            return x, mc, proto
+            return detect_out, mc, proto
 
-        shape = x[0].shape
+        shape = detect_out[0].shape
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (
-                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
+                a.transpose(0, 1) for a in make_anchors(detect_out, self.stride, 0.5)
             )
             self.shape = shape
 
-        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in detect_out], dim=2)
         box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
-        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
+        dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        y = torch.cat((dbox, cls.sigmoid()), dim=1)
 
         return self._topk_with_extra(y, mc, self.nm), proto
 
 # ============================================================================
 # OBB
 # ============================================================================
- 
+
 class OBB(Detect):
     """
-    YOLOv26 OBB head — angle = (sigmoid - 0.25) * π.
- 
-    DPU output (export=True) — 6 tensors:
-      outputs[0..2] → box+cls per level       (B, 4*reg_max+nc, Hi, Wi)
-      outputs[3..5] → raw angle per level     (B, ne,           Hi, Wi)  ← no sigmoid
+    YOLOv26 OBB head with end2end support.
+
+    DPU export — 6 tensors:
+      outputs[0..2] → one2one box+cls per level  (B, 4*reg_max+nc, Hi, Wi)
+      outputs[3..5] → angle logits per level     (B, ne, Hi, Wi)
     """
- 
-    def __init__(self, nc: int = 80, ne: int = 1,
-                 reg_max: int = 16, ch: tuple = ()):
-        super().__init__(nc, reg_max, ch)
+
+    def __init__(self, nc: int = 80, ne: int = 1, reg_max: int = 16, end2end: bool = False, ch: tuple = ()):
+        super().__init__(nc, reg_max, end2end, ch)
         self.ne = ne
         c4 = max(ch[0] // 4, ne)
         self.cv4 = nn.ModuleList(
             nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, ne, 1))
             for x in ch
         )
- 
+        if end2end:
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
+
+    @property
+    def one2many(self):
+        return dict(box_head=self.cv2, cls_head=self.cv3, angle_head=self.cv4)
+
+    @property
+    def one2one(self):
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, angle_head=self.one2one_cv4)
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module,
+        cls_head: torch.nn.Module,
+        angle_head: torch.nn.Module,
+    ) -> dict[str, torch.Tensor]:
+        preds = super().forward_head(x, box_head, cls_head)
+        if angle_head is not None:
+            bs = x[0].shape[0]
+            angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+            angle = (angle.sigmoid() - 0.25) * math.pi
+            preds["angle"] = angle
+        return preds
+
     def forward(self, x: list[torch.Tensor]):
-        bs = x[0].shape[0]
- 
-        # Per-level raw logits in spatial form
-        angle_per_level = [self.cv4[i](x[i]) for i in range(self.nl)]
- 
-        # Concatenated + normalised angle for decode_bboxes only (not exported)
-        angle_cat  = torch.cat(
-            [a.view(bs, self.ne, -1) for a in angle_per_level], dim=2
-        )
-        self.angle = (angle_cat.sigmoid() - 0.25) * math.pi
- 
-        for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
- 
-        if self.training or self.export:
-            # 6 outputs: [box+cls_l0, box+cls_l1, box+cls_l2,
-            #              angle_raw_l0, angle_raw_l1, angle_raw_l2]  ← raw logits, no sigmoid
-            return x + angle_per_level          # ← was: (a.sigmoid() - 0.25) * pi
- 
-        shape = x[0].shape
-        if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (
-                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
-            )
-            self.shape = shape
- 
-        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
-        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
-        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
- 
-        return self._topk_with_extra(y, self.angle, self.ne)
- 
+        preds = self.forward_head(x, **self.one2many)
+        if self.end2end:
+            x_detach = [xi.detach() for xi in x]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
+
+        if self.training:
+            return preds
+
+        active = self._active_head()
+        if self.export:
+            detect_out = self._export_raw([xi for xi in x], active)
+            angle_out = [active["angle_head"][i](x[i]) for i in range(self.nl)]
+            return detect_out + angle_out
+
+        infer_preds = preds["one2one"] if self.end2end else preds
+        self.angle = infer_preds["angle"]
+        y = self._inference(infer_preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return (y, preds)
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        self.angle = x["angle"]
+        preds = super()._inference(x)
+        return torch.cat([preds, x["angle"]], dim=1)
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        boxes, scores, angle = preds.split([4, self.nc, self.ne], dim=-1)
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        angle = angle.gather(dim=1, index=idx.repeat(1, 1, self.ne))
+        return torch.cat([boxes, scores, conf, angle], dim=-1)
+
     def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
- 
- 
+
+    def fuse(self) -> None:
+        self.cv2 = self.cv3 = self.cv4 = None
+
+
 # ============================================================================
 # OBB26
 # ============================================================================
- 
+
 class OBB26(OBB):
-    """
-    YOLOv26 OBB26 head — raw angle logits (no sigmoid in exported graph).
- 
-    DPU output (export=True) — 6 tensors:
-      outputs[0..2] → box+cls per level    (B, 4*reg_max+nc, Hi, Wi)
-      outputs[3..5] → raw angle per level  (B, ne,           Hi, Wi)  ← no sigmoid
-    """
- 
-    def forward(self, x: list[torch.Tensor]):
-        bs = x[0].shape[0]
- 
-        # Per-level raw logits in spatial form — no sigmoid baked in
-        angle_per_level = [self.cv4[i](x[i]) for i in range(self.nl)]
- 
-        # Concatenated + normalised angle for decode_bboxes only (not exported)
-        angle_cat  = torch.cat(
-            [a.view(bs, self.ne, -1) for a in angle_per_level], dim=2
-        )
-        self.angle = (angle_cat.sigmoid() - 0.25) * math.pi
- 
-        for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), dim=1)
- 
-        if self.training or self.export:
-            # 6 outputs: [box+cls_l0, box+cls_l1, box+cls_l2,
-            #              angle_raw_l0, angle_raw_l1, angle_raw_l2]  ← raw logits
-            return x + angle_per_level
- 
-        shape = x[0].shape
-        if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (
-                a.transpose(0, 1) for a in make_anchors(x, self.stride, 0.5)
-            )
-            self.shape = shape
- 
-        x_cat    = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=2)
-        box, cls = x_cat.split((self.reg_max * 4, self.nc), dim=1)
-        dbox     = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-        y        = torch.cat((dbox, cls.sigmoid()), dim=1)
- 
-        return self._topk_with_extra(y, self.angle, self.ne)
+    """YOLOv26 OBB26 head — raw angle logits in DPU raw export (no sigmoid in graph)."""
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module,
+        cls_head: torch.nn.Module,
+        angle_head: torch.nn.Module,
+    ) -> dict[str, torch.Tensor]:
+        preds = Detect.forward_head(self, x, box_head, cls_head)
+        if angle_head is not None:
+            bs = x[0].shape[0]
+            angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+            preds["angle"] = angle
+        return preds
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        angle = (x["angle"].sigmoid() - 0.25) * math.pi
+        x = {**x, "angle": angle}
+        return super()._inference(x)
  
 # ============================================================================
 # Pose

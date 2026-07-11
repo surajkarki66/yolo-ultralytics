@@ -41,6 +41,7 @@ class DetectONNX:
         reg_max: int,
         strides: list[int],
         max_det: int,
+        end2end: bool = False,
     ) -> None:
         self.imgsz = imgsz
         self.conf = conf
@@ -49,6 +50,7 @@ class DetectONNX:
         self.reg_max = reg_max
         self.strides = strides
         self.max_det = max_det
+        self.end2end = end2end
 
         available = ort.get_available_providers()
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in available]
@@ -175,16 +177,19 @@ class DetectONNX:
         conf = conf[keep]
         cls = cls[keep]
 
-        boxes_t = torch.from_numpy(boxes).float()
-        scores_t = torch.from_numpy(conf).float()
-        cls_t = torch.from_numpy(cls).float().unsqueeze(1)
+        if self.end2end:
+            order = np.argsort(-conf)[: self.max_det]
+            det = np.concatenate((boxes[order], conf[order, None], cls[order, None]), axis=1)
+        else:
+            boxes_t = torch.from_numpy(boxes).float()
+            scores_t = torch.from_numpy(conf).float()
+            cls_t = torch.from_numpy(cls).float().unsqueeze(1)
 
-        max_wh = 7680.0
-        boxes_for_nms = boxes_t + cls_t * max_wh
-        keep_idx = TorchNMS.nms(boxes_for_nms, scores_t, self.iou)
-        keep_idx = keep_idx[: self.max_det].cpu().numpy()
-
-        det = np.concatenate((boxes[keep_idx], conf[keep_idx, None], cls[keep_idx, None]), axis=1)
+            max_wh = 7680.0
+            boxes_for_nms = boxes_t + cls_t * max_wh
+            keep_idx = TorchNMS.nms(boxes_for_nms, scores_t, self.iou)
+            keep_idx = keep_idx[: self.max_det].cpu().numpy()
+            det = np.concatenate((boxes[keep_idx], conf[keep_idx, None], cls[keep_idx, None]), axis=1)
 
         gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
         det[:, [0, 2]] = (det[:, [0, 2]] - pad_w) / gain
@@ -330,6 +335,7 @@ class OBB26ONNX:
         ne: int,
         strides: list[int],
         max_det: int,
+        end2end: bool = False,
     ) -> None:
         self.imgsz = imgsz
         self.conf = conf
@@ -339,6 +345,7 @@ class OBB26ONNX:
         self.ne = ne
         self.strides = strides
         self.max_det = max_det
+        self.end2end = end2end
         self._resolved_angle_mode = None
 
         available = ort.get_available_providers()
@@ -505,25 +512,32 @@ class OBB26ONNX:
         cls = cls[keep]
         angles = angles[keep]
 
-        boxes_t = torch.from_numpy(np.concatenate((xywh, angles), axis=1)).float()
-        scores_t = torch.from_numpy(conf).float()
-        cls_t = torch.from_numpy(cls).float().unsqueeze(1)
+        if self.end2end:
+            order = np.argsort(-conf)[: self.max_det]
+            det = np.concatenate(
+                (xywh[order], conf[order, None], cls[order, None], angles[order]),
+                axis=1,
+            )
+        else:
+            boxes_t = torch.from_numpy(np.concatenate((xywh, angles), axis=1)).float()
+            scores_t = torch.from_numpy(conf).float()
+            cls_t = torch.from_numpy(cls).float().unsqueeze(1)
 
-        max_wh = 7680.0
-        offset = cls_t * max_wh
-        nms_boxes = torch.cat((boxes_t[:, :2] + offset, boxes_t[:, 2:4], boxes_t[:, 4:5]), dim=1)
-        keep_idx = TorchNMS.fast_nms(nms_boxes, scores_t, self.iou, iou_func=batch_probiou)
-        keep_idx = keep_idx[: self.max_det].cpu().numpy()
+            max_wh = 7680.0
+            offset = cls_t * max_wh
+            nms_boxes = torch.cat((boxes_t[:, :2] + offset, boxes_t[:, 2:4], boxes_t[:, 4:5]), dim=1)
+            keep_idx = TorchNMS.fast_nms(nms_boxes, scores_t, self.iou, iou_func=batch_probiou)
+            keep_idx = keep_idx[: self.max_det].cpu().numpy()
 
-        det = np.concatenate(
-            (
-                xywh[keep_idx],
-                conf[keep_idx, None],
-                cls[keep_idx, None],
-                angles[keep_idx],
-            ),
-            axis=1,
-        )
+            det = np.concatenate(
+                (
+                    xywh[keep_idx],
+                    conf[keep_idx, None],
+                    cls[keep_idx, None],
+                    angles[keep_idx],
+                ),
+                axis=1,
+            )
 
         gain, pad_w, pad_h = meta["gain"], meta["pad_w"], meta["pad_h"]
         det[:, 0] = (det[:, 0] - pad_w) / gain
@@ -698,6 +712,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ne", type=int, default=1, help="Angle channels")
     parser.add_argument("--strides", type=str, default="8,16,32", help="Comma-separated strides per output level")
     parser.add_argument("--max-det", type=int, default=300, help="Maximum detections per image")
+    parser.add_argument("--end2end", action="store_true", help="YOLOv26 end2end model (NMS-free top-k on CPU; detect or OBB)")
     parser.add_argument("--save-dir", type=str, default=None, help="Output directory")
     parser.add_argument(
         "--save-txt",
@@ -747,10 +762,17 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
         return
 
     with open(args.quant_meta, "rb") as f:
-        no, stride, reg_max, nc, _dfl = pickle.load(f)
+        cfg = pickle.load(f)
+
+    if len(cfg) >= 5:
+        no, stride, reg_max, nc, _dfl = cfg[:5]
+    else:
+        raise ValueError(f"Unexpected quant meta format in {args.quant_meta}")
 
     args.reg_max = int(reg_max)
     args.nc = int(nc)
+    if len(cfg) > 5:
+        args.end2end = bool(cfg[5])
 
     if isinstance(stride, torch.Tensor):
         stride_vals = stride.detach().cpu().tolist()
@@ -762,7 +784,7 @@ def apply_quant_meta(args: argparse.Namespace) -> None:
     args.strides = ",".join(str(int(s)) for s in stride_vals)
     print(
         f"Loaded quant meta from {args.quant_meta}: no={int(no)}, reg_max={args.reg_max}, nc={args.nc}, "
-        f"strides={args.strides}"
+        f"strides={args.strides}, end2end={args.end2end}"
     )
 
 
@@ -779,6 +801,7 @@ def _print_and_save_metrics(results: dict[str, float], save_dir: Path, task_titl
 
 
 def run_obb(args: argparse.Namespace, images: list[Path], save_dir: Path, source: Path, strides: list[int]) -> None:
+    end2end = getattr(args, "end2end", False)
     evaluator = OBB26ONNX(
         model=args.model,
         data=args.data,
@@ -790,10 +813,12 @@ def run_obb(args: argparse.Namespace, images: list[Path], save_dir: Path, source
         ne=args.ne,
         strides=strides,
         max_det=args.max_det,
+        end2end=end2end,
     )
 
     print(f"Loaded model: {args.model}")
     print(f"Task: OBB")
+    print(f"Post-process: {'NMS-free top-k' if end2end else 'rotated NMS'}")
     print(f"Input source: {source}")
     print(f"Images found: {len(images)}")
     print(f"Output dir: {save_dir}")
@@ -841,10 +866,12 @@ def run_detect(args: argparse.Namespace, images: list[Path], save_dir: Path, sou
         reg_max=args.reg_max,
         strides=strides,
         max_det=args.max_det,
+        end2end=getattr(args, "end2end", False),
     )
 
     print(f"Loaded model: {args.model}")
     print(f"Task: Detect")
+    print(f"Post-process: {'NMS-free top-k' if getattr(args, 'end2end', False) else 'IoU NMS'}")
     print(f"Input source: {source}")
     print(f"Images found: {len(images)}")
     print(f"Output dir: {save_dir}")

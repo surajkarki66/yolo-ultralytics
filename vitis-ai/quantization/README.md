@@ -15,10 +15,33 @@ OBB models use the same script when the checkpoint uses the patched OBB head; se
 | `run_compression.sh` | Example calib + test + deploy commands per DPU size |
 | `data/` | Calibration images ([data/README.md](data/README.md)) |
 
-## Environment
+## Environment (Vitis AI Docker)
+
+Use the official [Xilinx Vitis-AI](https://github.com/Xilinx/Vitis-AI) Docker image for quantization and compilation.
+
+**Quick start (from repo root):**
 
 ```bash
-conda activate vitis-ai-pytorch   # Vitis AI Docker / conda env
+# 1. Place calibration images in vitis-ai/quantization/data/ (or data/val/)
+# 2. Copy best.pt into vitis-ai/quantization/
+bash vitis-ai/quantization/run_in_vitis_docker.sh
+```
+
+**Manual start via official `docker_run.sh`:**
+
+```bash
+git clone https://github.com/Xilinx/Vitis-AI.git
+cd "/path/to/yolov26-ultralytics"
+/path/to/Vitis-AI/docker_run.sh xilinx/vitis-ai-pytorch-cpu:latest \
+  bash vitis-ai/quantization/run_yolov26_end2end_pipeline.sh
+```
+
+Inside the container, conda env `vitis-ai-pytorch` is activated automatically by the pipeline script.
+
+**Local conda (if already installed):**
+
+```bash
+conda activate vitis-ai-pytorch
 cd vitis-ai/quantization
 pip install -r requirements.txt   # pins ultralytics==8.4.24
 python patch_ultralytics.py
@@ -95,6 +118,30 @@ Copy artifacts to:
 
 - `../compilation/model/` — place `.xmodel` files for `vai_c_xir` (see `../compilation/README.md`)
 - `../evaluation/Quantized_Model/` or `../evaluation/Compiled_Model/` — pass the `.pkl` to post-processing scripts
+
+## YOLOv26 end2end (raw DPU export)
+
+YOLOv26 uses a **one-to-one end2end head** (`end2end=True`, `reg_max=1`). The DPU exports **raw one2one logits** (3 outputs per FPN level). Decode and post-processing (top-k or NMS) run on the CPU.
+
+```bash
+python vai_q_yolo.py \
+  --model_path best.pt \
+  --quant_mode calib \
+  --target DPUCZDX8G_ISA1_B4096 \
+  --img_height 416 --img_width 416
+
+python vai_q_yolo.py \
+  --model_path best.pt \
+  --quant_mode test --deploy \
+  --batch_size 1 \
+  --target DPUCZDX8G_ISA1_B4096 \
+  --img_height 416 --img_width 416
+```
+
+The calib pickle stores the `end2end` flag for evaluation scripts. Pass it via `--quant-meta` in `../evaluation/`.
+
+- **Default** (no flag): one2many export, CPU NMS post-processing.
+- **`--end2end`**: fuse one2many away, export one2one, CPU top-k post-processing.
 
 ## Notes
 
