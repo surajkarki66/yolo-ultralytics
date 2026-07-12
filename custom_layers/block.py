@@ -1508,74 +1508,77 @@ class Attention(nn.Module):
         return x
 '''
 
-class Attention(torch.nn.Module):
-    """DPU-compatible Attention Block"""
-    def __init__(self, ch, num_head):
+
+class Attention(nn.Module):
+    """DPU-compatible Attention: q/k/v via 1x1 convs, N×N scores via mul+sum, Hardsigmoid, permute on CPU."""
+
+    def __init__(self, dim: int, num_heads: int = 8, attn_ratio: float = 0.5):
         super().__init__()
-        self.num_head = num_head
-        self.dim_head = ch // num_head
-        self.dim_key = self.dim_head // 2
-        self.scale = self.dim_key ** -0.5
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.key_dim = int(self.head_dim * attn_ratio)
+        self.scale = self.key_dim**-0.5
+        nh_kd = self.key_dim * num_heads
+        h = dim + nh_kd * 2
 
-        self.qkv = Conv(ch, ch + self.dim_key * num_head * 2, 1, act=torch.nn.Identity())
+        self.qkv = Conv(dim, h, 1, act=False)
+        self.total_ch = h
+        self.q_ch = nh_kd
+        self.k_ch = nh_kd
+        self.v_ch = dim
 
-        self.conv1 = Conv(ch, ch, k=3, p=1, g=ch, act=torch.nn.Identity())
-        self.conv2 = Conv(ch, ch, 1, act=torch.nn.Identity())
-        
-        total_channels = ch + self.dim_key * num_head * 2
-        self.q_channels = self.dim_key * num_head
-        self.k_channels = self.dim_key * num_head
-        self.v_channels = ch
-        
-        # Create conv layers to extract q, k, v
-        self.extract_q = torch.nn.Conv2d(total_channels, self.q_channels, 1, bias=False)
-        self.extract_k = torch.nn.Conv2d(total_channels, self.k_channels, 1, bias=False)
-        self.extract_v = torch.nn.Conv2d(total_channels, self.v_channels, 1, bias=False)
-        
-        # Projection layer to match attention channels with value channels
-        self.attn_proj = torch.nn.Conv2d(self.q_channels, self.v_channels, 1, bias=False)
-        
-        # Initialize weights
+        self.extract_q = nn.Conv2d(self.total_ch, self.q_ch, 1, bias=False)
+        self.extract_k = nn.Conv2d(self.total_ch, self.k_ch, 1, bias=False)
+        self.extract_v = nn.Conv2d(self.total_ch, self.v_ch, 1, bias=False)
+        self._init_selection_weights()
+
+        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
+        self.proj = Conv(dim, dim, 1, act=False)
+        self.attn_act = nn.Hardsigmoid()
+
+    def _init_selection_weights(self):
         with torch.no_grad():
-            # Q extraction
             self.extract_q.weight.zero_()
-            for i in range(self.q_channels):
+            for i in range(self.q_ch):
                 self.extract_q.weight[i, i, 0, 0] = 1.0
-            
-            # K extraction
+
             self.extract_k.weight.zero_()
-            for i in range(self.k_channels):
-                self.extract_k.weight[i, self.q_channels + i, 0, 0] = 1.0
-            
-            # V extraction
+            for i in range(self.k_ch):
+                self.extract_k.weight[i, self.q_ch + i, 0, 0] = 1.0
+
             self.extract_v.weight.zero_()
-            for i in range(self.v_channels):
-                self.extract_v.weight[i, self.q_channels + self.k_channels + i, 0, 0] = 1.0
-            
-            # Initialize projection to average pooling
-            self.attn_proj.weight.fill_(1.0 / self.q_channels)
-        
-        # Hardsigmoid
-        self.attn_act = torch.nn.Hardsigmoid()
+            for i in range(self.v_ch):
+                self.extract_v.weight[i, self.q_ch + self.k_ch + i, 0, 0] = 1.0
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        N = H * W
+
         qkv = self.qkv(x)
+        q = self.extract_q(qkv)
+        k = self.extract_k(qkv)
+        v = self.extract_v(qkv)
 
-        # Extract q, k, v using convolutions
-        q = self.extract_q(qkv)  # [b, q_channels, h, w]
-        k = self.extract_k(qkv)  # [b, k_channels, h, w]
-        v = self.extract_v(qkv)  # [b, v_channels=ch, h, w]
-        
-        # Compute attention: q*k produces [b, q_channels, h, w]
-        # Project to match v's channel dimension using 1x1 conv
-        qk = q * k * self.scale  # [b, q_channels, h, w]
-        attn = self.attn_act(self.attn_proj(qk))  # [b, v_channels=ch, h, w]
-        
-        # Apply attention with element-wise multiplication
-        x = v * attn + self.conv1(v)
-        return self.conv2(x)
+        q = q.view(B, self.num_heads, self.key_dim, N)
+        k = k.view(B, self.num_heads, self.key_dim, N)
+        v = v.view(B, self.num_heads, self.head_dim, N)
 
-'''
+        q_exp = q.unsqueeze(-1)
+        k_exp = k.unsqueeze(-2)
+        attn = (q_exp * k_exp).sum(dim=2) * self.scale
+
+        attn = self.attn_act(attn)
+        attn_t = attn.transpose(-2, -1)
+
+        v_exp = v.unsqueeze(-1)
+        attn_exp = attn_t.unsqueeze(2)
+        out = (v_exp * attn_exp).sum(dim=3)
+
+        out = out.reshape(B, C, H, W)
+        out = out + self.pe(v.reshape(B, C, H, W))
+        return self.proj(out)
+
+
 class PSABlock(nn.Module):
     """
     PSABlock class implementing a Position-Sensitive Attention block for neural networks.
@@ -1628,20 +1631,7 @@ class PSABlock(nn.Module):
         x = x + self.ffn(x) if self.add else self.ffn(x)
         return x
 
-'''
-class PSABlock(torch.nn.Module):
 
-    def __init__(self, ch, num_heads):
-        super().__init__()
-        self.conv1 = Attention(ch, num_heads)
-        self.conv2 = torch.nn.Sequential(Conv(ch, ch * 2),
-                                         Conv(ch * 2, ch))
-
-    def forward(self, x):
-        x = x + self.conv1(x)
-        return x + self.conv2(x)
-
-'''
 class PSA(nn.Module):
     """
     PSA class for implementing Position-Sensitive Attention in neural networks.
@@ -1714,6 +1704,8 @@ class PSA(torch.nn.Module):
         x_a = self.conv1a(x)
         x_b = self.conv1b(x)
         return self.conv2(torch.cat(tensors=(x_a, self.res_m(x_b)), dim=1))
+
+'''
 
 
 class C2PSA(nn.Module):

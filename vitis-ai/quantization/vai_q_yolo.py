@@ -75,6 +75,13 @@ parser.add_argument(
     help='Fuse one2many and export one2one for NMS-free top-k (default: one2many + CPU NMS)',
 )
 
+parser.add_argument(
+    '--max_batches',
+    default=None,
+    type=int,
+    help='Limit calibration/test forward passes (e.g. 1 for fast xmodel deploy)',
+)
+
 
 args, _ = parser.parse_known_args()
 
@@ -209,8 +216,10 @@ class LoadImages:
 def experimental(model):
     img_size = (args.img_width, args.img_height)
     dataset = LoadImages("data/val_ids.txt", args.batch_size, img_size=img_size)
-    for _, batch in tqdm(enumerate(dataset), total=len(dataset)):
-        # processing
+    total = len(dataset) if args.max_batches is None else min(len(dataset), args.max_batches)
+    for batch_idx, batch in tqdm(enumerate(dataset), total=total):
+        if args.max_batches is not None and batch_idx >= args.max_batches:
+            break
         _, transform_im, _ = batch
         batch_tensor = torch.stack([torch.from_numpy(data.transpose(2,0,1)).to(device).float() / 255.0 for data in transform_im])
 
