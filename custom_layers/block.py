@@ -1443,71 +1443,6 @@ class C2fCIB(C2f):
         """
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
-
-'''
-class Attention(nn.Module):
-    """
-    Attention module that performs self-attention on the input tensor.
-
-    Args:
-        dim (int): The input tensor dimension.
-        num_heads (int): The number of attention heads.
-        attn_ratio (float): The ratio of the attention key dimension to the head dimension.
-
-    Attributes:
-        num_heads (int): The number of attention heads.
-        head_dim (int): The dimension of each attention head.
-        key_dim (int): The dimension of the attention key.
-        scale (float): The scaling factor for the attention scores.
-        qkv (Conv): Convolutional layer for computing the query, key, and value.
-        proj (Conv): Convolutional layer for projecting the attended values.
-        pe (Conv): Convolutional layer for positional encoding.
-    """
-
-    def __init__(self, dim: int, num_heads: int = 8, attn_ratio: float = 0.5):
-        """
-        Initialize multi-head attention module.
-
-        Args:
-            dim (int): Input dimension.
-            num_heads (int): Number of attention heads.
-            attn_ratio (float): Attention ratio for key dimension.
-        """
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.key_dim = int(self.head_dim * attn_ratio)
-        self.scale = self.key_dim**-0.5
-        nh_kd = self.key_dim * num_heads
-        h = dim + nh_kd * 2
-        self.qkv = Conv(dim, h, 1, act=False)
-        self.proj = Conv(dim, dim, 1, act=False)
-        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the Attention module.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            (torch.Tensor): The output tensor after self-attention.
-        """
-        B, C, H, W = x.shape
-        N = H * W
-        qkv = self.qkv(x)
-        q, k, v = qkv.view(B, self.num_heads, self.key_dim * 2 + self.head_dim, N).split(
-            [self.key_dim, self.key_dim, self.head_dim], dim=2
-        )
-
-        attn = (q.transpose(-2, -1) @ k) * self.scale
-        attn = attn.softmax(dim=-1)
-        x = (v @ attn.transpose(-2, -1)).view(B, C, H, W) + self.pe(v.reshape(B, C, H, W))
-        x = self.proj(x)
-        return x
-'''
-
 class Attention(torch.nn.Module):
     """DPU-compatible Attention Block"""
     def __init__(self, ch, num_head):
@@ -1575,60 +1510,6 @@ class Attention(torch.nn.Module):
         x = v * attn + self.conv1(v)
         return self.conv2(x)
 
-'''
-class PSABlock(nn.Module):
-    """
-    PSABlock class implementing a Position-Sensitive Attention block for neural networks.
-
-    This class encapsulates the functionality for applying multi-head attention and feed-forward neural network layers
-    with optional shortcut connections.
-
-    Attributes:
-        attn (Attention): Multi-head attention module.
-        ffn (nn.Sequential): Feed-forward neural network module.
-        add (bool): Flag indicating whether to add shortcut connections.
-
-    Methods:
-        forward: Performs a forward pass through the PSABlock, applying attention and feed-forward layers.
-
-    Examples:
-        Create a PSABlock and perform a forward pass
-        >>> psablock = PSABlock(c=128, attn_ratio=0.5, num_heads=4, shortcut=True)
-        >>> input_tensor = torch.randn(1, 128, 32, 32)
-        >>> output_tensor = psablock(input_tensor)
-    """
-
-    def __init__(self, c: int, attn_ratio: float = 0.5, num_heads: int = 4, shortcut: bool = True) -> None:
-        """
-        Initialize the PSABlock.
-
-        Args:
-            c (int): Input and output channels.
-            attn_ratio (float): Attention ratio for key dimension.
-            num_heads (int): Number of attention heads.
-            shortcut (bool): Whether to use shortcut connections.
-        """
-        super().__init__()
-
-        self.attn = Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)
-        self.ffn = nn.Sequential(Conv(c, c * 2, 1), Conv(c * 2, c, 1, act=False))
-        self.add = shortcut
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Execute a forward pass through PSABlock.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            (torch.Tensor): Output tensor after attention and feed-forward processing.
-        """
-        x = x + self.attn(x) if self.add else self.attn(x)
-        x = x + self.ffn(x) if self.add else self.ffn(x)
-        return x
-
-'''
 class PSABlock(torch.nn.Module):
 
     def __init__(self, ch, num_heads):
@@ -1641,65 +1522,6 @@ class PSABlock(torch.nn.Module):
         x = x + self.conv1(x)
         return x + self.conv2(x)
 
-'''
-class PSA(nn.Module):
-    """
-    PSA class for implementing Position-Sensitive Attention in neural networks.
-
-    This class encapsulates the functionality for applying position-sensitive attention and feed-forward networks to
-    input tensors, enhancing feature extraction and processing capabilities.
-
-    Attributes:
-        c (int): Number of hidden channels after applying the initial convolution.
-        cv1 (Conv): 1x1 convolution layer to reduce the number of input channels to 2*c.
-        cv2 (Conv): 1x1 convolution layer to reduce the number of output channels to c.
-        attn (Attention): Attention module for position-sensitive attention.
-        ffn (nn.Sequential): Feed-forward network for further processing.
-
-    Methods:
-        forward: Applies position-sensitive attention and feed-forward network to the input tensor.
-
-    Examples:
-        Create a PSA module and apply it to an input tensor
-        >>> psa = PSA(c1=128, c2=128, e=0.5)
-        >>> input_tensor = torch.randn(1, 128, 64, 64)
-        >>> output_tensor = psa.forward(input_tensor)
-    """
-
-    def __init__(self, c1: int, c2: int, e: float = 0.5):
-        """
-        Initialize PSA module.
-
-        Args:
-            c1 (int): Input channels.
-            c2 (int): Output channels.
-            e (float): Expansion ratio.
-        """
-        super().__init__()
-        assert c1 == c2
-        self.c = int(c1 * e)
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c1, 1)
-
-        self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
-        self.ffn = nn.Sequential(Conv(self.c, self.c * 2, 1), Conv(self.c * 2, self.c, 1, act=False))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Execute forward pass in PSA module.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            (torch.Tensor): Output tensor after attention and feed-forward processing.
-        """
-        a, b = self.cv1(x).split((self.c, self.c), dim=1)
-        b = b + self.attn(b)
-        b = b + self.ffn(b)
-        return self.cv2(torch.cat((a, b), 1))
-
-'''
 class PSA(torch.nn.Module):
     def __init__(self, ch, n):
         super().__init__()
