@@ -1,0 +1,6 @@
+torch
+Pillow
+numpy
+tqdm
+opencv-python
+PyYAML

@@ -21,8 +21,8 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument(
     '--model_path',
-    default="best.pt",
-    help='Ultralytics checkpoint path (e.g. best.pt or yolo26n.pt)',
+    default="yolov8n",
+    help='Model path to process. Eg: yolov8x'
 )
 
 parser.add_argument(
@@ -68,20 +68,6 @@ parser.add_argument(
     help='Input image width'
 )
 
-parser.add_argument(
-    '--end2end',
-    action='store_true',
-    default=False,
-    help='Fuse one2many and export one2one for NMS-free top-k (default: one2many + CPU NMS)',
-)
-
-parser.add_argument(
-    '--max_batches',
-    default=None,
-    type=int,
-    help='Limit calibration/test forward passes (e.g. 1 for fast xmodel deploy)',
-)
-
 
 args, _ = parser.parse_known_args()
 
@@ -94,40 +80,17 @@ def detect_config_pickle_path(model_path: str) -> Path:
 
 def run_model_exports(model):
     import pickle
-    head = model.model[-1]
-    tensor_no = head.no
-    tensor_stride = head.stride
-    tensor_reg_max = head.reg_max
-    tensor_nc = head.nc
-    layer_dfl = head.dfl
-    end2end = getattr(head, "end2end", False)
+    tensor_no = model.model[-1].no
+    tensor_stride = model.model[-1].stride
+    tensor_reg_max = model.model[-1].reg_max
+    tensor_nc = model.model[-1].nc
+    layer_dfl = model.model[-1].dfl
     output_path = detect_config_pickle_path(args.model_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:
-        pickle.dump((tensor_no, tensor_stride, tensor_reg_max, tensor_nc, layer_dfl, end2end), f)
+        pickle.dump((tensor_no, tensor_stride, tensor_reg_max, tensor_nc, layer_dfl), f)
     print(f"Saved detect head config to {output_path}")
     return
-
-
-def prepare_model_for_quant(model):
-    """Configure detect head for DPU export; fuse one2many when end2end export is requested."""
-    head = model.model[-1]
-    if not hasattr(head, "export"):
-        print("[WARN] Head has no export flag; assuming stock Ultralytics head.")
-        return model
-
-    head.export = True
-    print("[INFO] Head export=True (raw DPU logits)")
-
-    if args.end2end and getattr(head, "end2end") and hasattr(head, "fuse"):
-        head.fuse()
-        print("[INFO] --end2end: fused one2many away; exporting one2one for CPU top-k.")
-    elif args.end2end:
-        print("[INFO] --end2end requested but head has no one2one branch; exporting as-is.")
-    elif hasattr(head, "end2end"):
-        head.end2end = False
-        print("[INFO] Default one2many export for CPU NMS.")
-    return model
 
 
 IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"}  # image suffixes
@@ -135,14 +98,21 @@ FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}"
 
 class LoadImages:
     """
-    Calibration image dataloader for YOLOv26 / YOLOv11 quantization.
+    YOLOv8 image dataloader.
 
-    Loads image paths from a txt file, directory, glob, or single file and
-    resizes each image to the target width and height before batching.
+    This class manages the loading and pre-processing of image data for YOLOv8. It supports loading from
+    various formats, including single image files and lists of image paths.
+
+    Attributes:
+        files (list): List of image file paths.
+        nf (int): Total number of files (images).
+        mode (str): Current mode, 'image'.
+        bs (int): Batch size.
+        count (int): Counter for iteration, initialized at 0 during `__iter__()`.
     """
 
     def __init__(self, path, batch=1, img_size=(640, 640)):
-        """Initialize the dataloader and raise FileNotFoundError if file not found.
+        """Initialize the Dataloader and raise FileNotFoundError if file not found.
 
         Args:
             path: Image path, directory, glob, or txt list of paths.
@@ -216,10 +186,8 @@ class LoadImages:
 def experimental(model):
     img_size = (args.img_width, args.img_height)
     dataset = LoadImages("data/val_ids.txt", args.batch_size, img_size=img_size)
-    total = len(dataset) if args.max_batches is None else min(len(dataset), args.max_batches)
-    for batch_idx, batch in tqdm(enumerate(dataset), total=total):
-        if args.max_batches is not None and batch_idx >= args.max_batches:
-            break
+    for _, batch in tqdm(enumerate(dataset), total=len(dataset)):
+        # processing
         _, transform_im, _ = batch
         batch_tensor = torch.stack([torch.from_numpy(data.transpose(2,0,1)).to(device).float() / 255.0 for data in transform_im])
 
@@ -239,7 +207,6 @@ def quantization():
     
     model.float()
     model.eval()
-    model = prepare_model_for_quant(model)
 
     if quant_mode != 'test' and deploy:
         deploy = False

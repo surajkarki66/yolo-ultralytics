@@ -2,14 +2,14 @@
 
 Run the **NNDCT `Inspector`** on a PyTorch checkpoint **before** quantization. It checks whether the graph and operators are compatible with a chosen **DPU target** and writes visualization artifacts (PNG by default) so you can spot unsupported layers early.
 
-Applies to **YOLOv26**, **YOLOv11**, and their OBB variants.
+Applies to **YOLOv8** (Detect) and **YOLOv8-OBB**.
 
 ## Prerequisites
 
 - **Vitis AI** environment with PyTorch and `pytorch_nndct` (same Docker / conda stack as quantization), e.g. `conda activate vitis-ai-pytorch`.
 - Patch Ultralytics in the Vitis environment first (see `../quantization/README.md`).
 - **Checkpoint format**: `inspection.py` loads `torch.load(...)` and expects a dict with a **`"model"`** key (Ultralytics training output, same as `../quantization/vai_q_yolo.py`).
-- Activations are already DPU-friendly when trained with root `custom_layers/` + `patch_ultralytics.py` (HardSwish via patched modules).
+- Activations are DPU-friendly when trained with root `custom_layers/` + `patch_ultralytics.py` (HardSwish via patched modules).
 
 ## Script: `inspection.py`
 
@@ -35,14 +35,14 @@ conda activate vitis-ai-pytorch
 python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096
 ```
 
-Align `--img_height` / `--img_width` and `--target` with `../quantization/vai_q_yolo.py` and `../compilation/Architectures/arch_B*.json`.
+Align `--img_height` / `--img_width` and `--target` with `../quantization/vai_q_yolo.py` and `../compilation/DPUCZDX8G/arch_B*.json`.
 
 ## Reference commands: `inspect.sh`
 
 `inspect.sh` is a commented cheat sheet of example invocations for:
 
-- **YOLOv26 / YOLOv11** detection (`best.pt`) across DPU sizes **B4096** down to **B512**
-- **YOLOv26-OBB / YOLOv11-OBB** with the same targets
+- **YOLOv8** detection (`best.pt`) across DPU sizes **B4096** down to **B512**
+- **YOLOv8-OBB** with the same targets
 
 Uncomment or copy the line you need.
 

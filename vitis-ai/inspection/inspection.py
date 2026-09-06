@@ -1,8 +1,7 @@
-import torch
 import argparse
-
-
 from pathlib import Path
+
+import torch
 from pytorch_nndct.apis import Inspector
 
 parser = argparse.ArgumentParser(description="Inspect PyTorch model with NNDCT")
@@ -36,34 +35,7 @@ parser.add_argument(
     default="inspect",
     help="Directory for inspector PNG output",
 )
-parser.add_argument(
-    "--end2end",
-    action="store_true",
-    default=False,
-    help="Inspect fused one2one export (default: one2many for CPU NMS)",
-)
 args = parser.parse_args()
-
-
-def prepare_model_for_inspect(model):
-    """Match vai_q_yolo.py export settings so inspection reflects the quantized graph."""
-    head = model.model[-1]
-    if not hasattr(head, "export"):
-        print("[WARN] Head has no export flag; assuming stock Ultralytics head.")
-        return model
-
-    head.export = True
-    print("[INFO] Head export=True (raw DPU logits)")
-
-    if args.end2end and getattr(head, "end2end") and hasattr(head, "fuse"):
-        head.fuse()
-        print("[INFO] --end2end: fused one2many away; exporting one2one.")
-    elif args.end2end:
-        print("[INFO] --end2end requested but head has no one2one branch; exporting as-is.")
-    elif hasattr(head, "end2end"):
-        head.end2end = False
-        print("[INFO] Default one2many export for CPU NMS.")
-    return model
 
 model_path = Path(args.model_path)
 if not model_path.is_file():
@@ -81,7 +53,6 @@ checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
 model = checkpoint["model"]
 model = model.float()
 model.eval()
-model = prepare_model_for_inspect(model)
 model = model.to(device)
 
 dummy_input = torch.randn(1, 3, args.img_height, args.img_width, device=device)

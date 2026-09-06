@@ -1,8 +1,10 @@
 #!/bin/bash
+# Copy best.pt into this directory or pass a path to your trained checkpoint.
+# Run after patching Ultralytics in vitis-ai/quantization (see README.md).
 
 ## B4096
 
-## YOLOv26 / YOLOv11
+## YOLOv8
 python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304
@@ -12,7 +14,7 @@ python inspection.py --model_path best.pt --img_height 416 --img_width 416 --tar
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B800
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B512
 
-## YOLOv26-OBB / YOLOv11-OBB
+## YOLOv8-OBB
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B4096
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B3136
 #python inspection.py --model_path best.pt --img_height 416 --img_width 416 --target DPUCZDX8G_ISA1_B2304

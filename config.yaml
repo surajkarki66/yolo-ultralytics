@@ -1,12 +1,11 @@
 # Training Configuration
-# YOLOv26 and YOLOv11 are supported (Detect and OBB)
 training:
   # Model parameters
-  model: "yolo26n.pt"  # e.g. yolo26n.pt (Detect) or yolo26n-obb.pt (OBB); yolo11n.pt for YOLOv11
+  model: "yolov8n-obb.pt"  # YOLOv8-OBB pretrained weights
 
   # Data parameters
   data: "./dataset/data.yaml"
-  epochs: 900
+  epochs: 1
   imgsz: 416
   device: 'cuda:0'
 
@@ -19,7 +18,7 @@ training:
   lrf: 0.01
   momentum: 0.937
   weight_decay: 0.0005
-  warmup_epochs: 3.0
+  warmup_epochs: 0.0
   warmup_momentum: 0.8
   warmup_bias_lr: 0.1
 
@@ -29,7 +28,7 @@ training:
   save: true
   save_period: -1
   project: 'runs'
-  name: 'yolov26n_train'  # e.g. yolo11n_train or yolov26n_obb_train for OBB
+  name: 'yolov8n_obb_train'
   pretrained: true
   freeze: null
   cache: false
@@ -44,13 +43,6 @@ training:
   deterministic: true
   exist_ok: false
 
-  # Data augmentation (0.0 disables each component)
-  hsv_h: 0.0
-  hsv_s: 0.0
-  hsv_v: 0.0
-  mixup: 0.0
-  copy_paste: 0.0
-
 # Testing Configuration
 testing:
   # Data parameters
@@ -58,14 +50,14 @@ testing:
   imgsz: 416
   device: 'cuda:0'   # cpu for CPU, cuda:0 for GPU
 
-  # Model parameters (update after training)
-  model_path: "./runs/yolov26n_train/weights/best.pt"
+  # Model parameters (updated after training)
+  model_path: "./runs/yolov8n_obb_train/weights/best.pt"
 
   # Testing parameters
   batch: 32
   workers: 8
   project: 'runs'
-  name: 'yolov26n_test'
+  name: 'yolov8n_obb_test'
   save_txt: true
   save_conf: true
   save_json: true
@@ -82,18 +74,12 @@ testing:
 
 # Cross-Validation Configuration
 cross_validation:
-  # Model parameters
-  model: "yolo26n.pt"
-
-  # Data parameters
+  model: "yolov8n-obb.pt"
   dataset_path: "./dataset"
   data_yaml_path: "./dataset/data.yaml"
   k_splits: 10
   random_state: 42
-
-  task: detect
-  epochs: 2
-
+  epochs: 1
   patience: 150
   batch: -1
   imgsz: 416
@@ -157,7 +143,7 @@ cross_validation:
   lrf: 0.01
   momentum: 0.937
   weight_decay: 0.0005
-  warmup_epochs: 3.0
+  warmup_epochs: 0.0
   warmup_momentum: 0.8
   warmup_bias_lr: 0.1
   box: 7.5
@@ -166,9 +152,9 @@ cross_validation:
   pose: 12.0
   kobj: 1.0
   nbs: 64
-  hsv_h: 0.0
-  hsv_s: 0.0
-  hsv_v: 0.0
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
   degrees: 0.0
   translate: 0.1
   scale: 0.5
@@ -185,29 +171,20 @@ cross_validation:
   auto_augment: randaugment
   erasing: 0.4
   cfg: null
-
-  # Project settings
   project: 'runs/cross_validation'
 
 # Hyperparameter Tuning Configuration
 hyperparameter_tuning:
-  # Model parameters
-  model: "yolo26n.pt"
-
-  # Data parameters
+  model: "yolov8n-obb.pt"
   data: "./dataset/data.yaml"
-  epochs: 50
-
-  # Tuning parameters
-  iterations: 50
-
-  # Search space parameters (ranges for tuning)
+  epochs: 1
+  iterations: 1
   search_space:
     lr0: [0.00001, 0.1]
     lrf: [0.01, 1.0]
     momentum: [0.6, 0.98]
     weight_decay: [0.0, 0.001]
-    warmup_epochs: [0.0, 5.0]
+    warmup_epochs: [0.0, 0.0]
     warmup_momentum: [0.0, 0.95]
     box: [0.02, 0.2]
     cls: [0.2, 4.0]
@@ -227,7 +204,7 @@ hyperparameter_tuning:
 
 # Benchmark Configuration
 benchmark:
-  model_path: "./runs/yolov26n_train/weights/best.pt"
+  model_path: "./runs/yolov8n_obb_train/weights/best.pt"
   data: "./dataset/data.yaml"
   imgsz: 416
   half: true
@@ -242,7 +219,7 @@ settings:
 
 # Export configuration
 export:
-  model_path: "./runs/yolov26n_train/weights/best.pt"
+  model_path: "./runs/yolov8n_obb_train/weights/best.pt"
   format: "onnx"
   imgsz: 416
   keras: false

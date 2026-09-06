@@ -1,44 +1,19 @@
-# Efficient YOLO Pipeline for AMD DPU Deployment
+# Efficient YOLO Pipeline for Edge Deployment
 
 This repository provides an end-to-end workflow for YOLO model development and deployment:
 
-* dataset checks and visualization
-* training, testing, tuning, benchmark, and export
-* Vitis AI inspection, quantization, compilation, evaluation, and on-target inference for Detect and OBB pipelines
+- dataset checks and visualization
+- training, testing, tuning, benchmark, and export
+- Vitis AI inspection, quantization, compilation, evaluation, and on-target inference for Detect and OBB pipelines
 
 The main CLI entrypoint is `main.py`.
 
-## Citation
-
-This repository contains the code used in the paper:
-
-> **No Attention, No Problem: DPU-Aware Attention Approximation in Modern YOLO on FPGA**
-
-The work was presented at the **29th Euromicro Conference Series on Digital System Design (DSD) and 52nd Euromicro Conference Series on Software Engineering and Advanced Applications (SEAA)**, held in **Kraków, Poland, September 2–4, 2026**.
-
-If you use this code or build upon this work, please cite:
-
-```bibtex
-@misc{karki2026attentionproblemdpuawareattention,
-  title={No Attention, No Problem: DPU-Aware Attention Approximation in Modern YOLO on FPGA},
-  author={Suraj Karki and Qazi Arbab Ahmed and Thorsten Jungeblut},
-  year={2026},
-  eprint={2607.13106},
-  archivePrefix={arXiv},
-  primaryClass={cs.AR},
-  url={https://arxiv.org/abs/2607.13106}
-}
-```
-
-The DOI for the published conference version will be added once it is available.
-
 ## Version Compatibility
 
-* This repository can be adapted for multiple YOLO versions in general workflows.
-* For the Vitis AI-compatible training and deployment path in this repo, supported models are:
-
-  * `YOLOv26` / `YOLOv11` (Detect)
-  * `YOLOv26-OBB` / `YOLOv11-OBB` (Oriented Bounding Boxes)
+- This repository can be adapted for multiple YOLO versions in general workflows.
+- For the Vitis AI-compatible training and deployment path in this repo, supported models are:
+  - `YOLOv8` (Detect)
+  - `YOLOv8-OBB` (Oriented Bounding Boxes)
 
 ## Quick Start
 
@@ -74,32 +49,31 @@ python3 main.py export
 
 ## CLI Notes
 
-* `visualize --num-samples` is applied per split (`train`, `valid`, `test`).
-* `eda` and `visualize` support `.jpg`, `.jpeg`, and `.png` (case-insensitive).
-* EDA handles YOLO bbox (5 fields/line) and OBB (9 fields/line) labels; images without label files count as zero annotations.
-* Training, testing, tuning, export, benchmark, and cross-validation read **`config.yaml`** — update dataset and checkpoint paths before running (defaults are placeholders).
+- `visualize --num-samples` is applied per split (`train`, `valid`, `test`).
+- `eda` and `visualize` support `.jpg`, `.jpeg`, and `.png` (case-insensitive).
+- EDA handles YOLO bbox (5 fields/line) and OBB (9 fields/line) labels; images without label files count as zero annotations.
+- Training, testing, tuning, export, benchmark, and cross-validation read **`config.yaml`** — update dataset and checkpoint paths before running (defaults are placeholders).
 
 ## Project Areas
 
-* `dataset/` — dataset layout and label format (YOLO + YOLO OBB)
-* `dataset_utils/` — EDA and visualization (`eda.py`, `visualize_dataset.py`)
-* `custom_layers/` — DPU-friendly `conv.py` / `block.py` patched into Ultralytics (root `patch_ultralytics.py`)
-* `scripts/` — train, test, tune, export, benchmark, cross-validation (via `main.py`)
-* `config.yaml` — paths and hyperparameters for `main.py` commands
-* `vitis-ai/` — inspection, quantization, compilation, evaluation, and on-target inference
-
+- `dataset/` — dataset layout and label format (YOLO + YOLO OBB)
+- `dataset_utils/` — EDA and visualization (`eda.py`, `visualize_dataset.py`)
+- `custom_layers/` — DPU-friendly `conv.py` / `block.py` patched into Ultralytics (root `patch_ultralytics.py`)
+- `scripts/` — train, test, tune, export, benchmark, cross-validation (via `main.py`)
+- `config.yaml` — paths and hyperparameters for `main.py` commands
+- `vitis-ai/` — inspection, quantization, compilation, evaluation, and on-target inference  
   Start here: [vitis-ai/README.md](vitis-ai/README.md)
 
-## Vitis AI High-Level Flow
+## Vitis AI high-level flow
 
-1. Inspect model in `vitis-ai/inspection/` (optional, recommended before quantization)
-2. Quantize model in `vitis-ai/quantization/`
-3. Compile in `vitis-ai/compilation/`
-4. Evaluate in `vitis-ai/evaluation/Quantized_Model/` or `vitis-ai/evaluation/Compiled_Model/`
-5. Deploy (optional) in `vitis-ai/inference/` (YOLOv26 or YOLOv11 paths)
+1. **Inspect** (optional) — `vitis-ai/inspection/` (NNDCT `Inspector`)
+2. **Quantize** — `vitis-ai/quantization/` (`vai_q_yolo.py`)
+3. **Compile** — `vitis-ai/compilation/` (`model/` + `vai_c_xir`)
+4. **Evaluate** — `vitis-ai/evaluation/` (Detect or OBB, Quantized or Compiled path)
+5. **Deploy** (optional) — `vitis-ai/inference/` (C++ FPS, realtime video)
 
-> **Note:** FPGA deployment through Vitis AI in this repository requires `ultralytics==8.4.24`.
-> This is a strict dependency for the supported quantization/patching workflow.
+> **Note:** The Vitis quantization workflow uses **`ultralytics==8.1.47`** (`vitis-ai/quantization/requirements.txt`).  
+> Root training uses the version in `requirements.txt`. Patch Ultralytics separately in each environment (see below).
 
 ## End-to-End Workflow
 
@@ -113,7 +87,7 @@ python3 main.py train
 
 Edit **`config.yaml`** first (`training.data`, `testing.model_path`, etc.). Commands are implemented under `scripts/` and invoked by `main.py`.
 
-### Phase 1b: Inspection (optional, inside Vitis AI)
+### Phase 1b: Inspection (optional, Vitis AI environment)
 
 Validate DPU compatibility before quantization:
 
@@ -126,105 +100,61 @@ python inspection.py --model_path best.pt --img_height 416 --img_width 416 --tar
 
 See `vitis-ai/inspection/README.md` for details and `inspect.sh` for per-DPU examples.
 
-### Phase 2: Quantization Phase (inside Vitis AI)
-
-Activate the Vitis AI PyTorch environment first:
+### Phase 2: Quantization (Vitis AI environment)
 
 ```bash
 conda activate vitis-ai-pytorch
-```
-
-Install quantization dependencies:
-
-```bash
 cd vitis-ai/quantization
 pip install -r requirements.txt
+python patch_ultralytics.py          # copies quantization/custom_layers/ into Ultralytics
+python prepare_calibration_data.py   # needs images in data/val/
 ```
 
-Patch Ultralytics in the Vitis AI environment:
+Calibration then deploy export:
 
 ```bash
-cd vitis-ai/quantization
-python patch_ultralytics.py
+python vai_q_yolo.py --model_path best.pt --batch_size 16 --img_height 416 --img_width 416 \
+  --target DPUCZDX8G_ISA1_B4096 --quant_mode calib
+python vai_q_yolo.py --model_path best.pt --batch_size 1 --img_height 416 --img_width 416 \
+  --target DPUCZDX8G_ISA1_B4096 --quant_mode test --deploy
 ```
 
-Prepare calibration data:
+Outputs in `quantize_result/`:
 
-```bash
-cd vitis-ai/quantization
-python prepare_calibration_data.py
-```
-
-Run quantization (calib then test). Use `--model_path` for your trained or converted `.pt` (match `--img_height` / `--img_width` to your model, e.g. 416):
-
-```bash
-cd vitis-ai/quantization
-
-python vai_q_yolo.py \
-  --model_path <trained_or_exported_model.pt> \
-  --batch_size 16 \
-  --img_height 416 \
-  --img_width 416 \
-  --target DPUCZDX8G_ISA1_B4096 \
-  --quant_mode calib
-
-python vai_q_yolo.py \
-  --model_path <trained_or_exported_model.pt> \
-  --batch_size 1 \
-  --img_height 416 \
-  --img_width 416 \
-  --target DPUCZDX8G_ISA1_B4096 \
-  --quant_mode test \
-  --deploy
-```
-
-This generates quantized artifacts (including `.xmodel`) for deployment.
+- `DetectionModel_int.xmodel` (typical detect name)
+- `best_config_no_srd_reg_nc_dfl.pkl` (stem from `--model_path`)
 
 Details: [vitis-ai/quantization/README.md](vitis-ai/quantization/README.md)
 
-### Phase 3: Compilation Phase
+### Phase 3: Compilation
 
-Copy the quantized `.xmodel` into `vitis-ai/compilation/model/`, then compile:
+Copy `.xmodel` files into `vitis-ai/compilation/model/`, then uncomment your DPU block in `run_compile.sh` or run:
 
 ```bash
 cd vitis-ai/compilation
-
-vai_c_xir \
-  -x model/DetectionModel_int.xmodel \
-  -a Architectures/arch_B4096.json \
-  -o zynq_output/yolov26n/ \
-  -n yolov26n
+vai_c_xir -x model/DetectionModel_int.xmodel -a DPUCZDX8G/arch_B4096.json -o zynq_output/yolov8n/ -n yolov8n
 ```
 
-Place both model types in `model/`:
-
-* `DetectionModel_int.xmodel` — YOLOv26 / YOLOv11 detection
-* `OBBModel_int.xmodel` — YOLOv26-OBB / YOLOv11-OBB
-
-For OBB, use `model/OBBModel_int.xmodel` with the matching output name (e.g. `yolov26n_obb`). See `vitis-ai/compilation/run_compile.sh` for all architecture options.
+OBB: `model/OBBModel_int.xmodel` → `zynq_output/yolov8n_obb/`.
 
 Details: [vitis-ai/compilation/README.md](vitis-ai/compilation/README.md)
 
 ### Phase 4: Evaluation
 
-| Task                | Path                                   | Script                                              |
-| ------------------- | -------------------------------------- | --------------------------------------------------- |
-| Detect / OBB (ONNX) | `vitis-ai/evaluation/Quantized_Model/` | `eval_onnx.py`                                      |
-| Detect (FPGA NPZ)   | `vitis-ai/evaluation/Compiled_Model/`  | `fpga_inference.py` → `eval_predictions_npz.py`     |
-| OBB (FPGA NPZ)      | `vitis-ai/evaluation/Compiled_Model/`  | `fpga_inference_obb.py` → `eval_predictions_npz.py` |
+| Task | Folder |
+|------|--------|
+| Detect (ONNX) | `vitis-ai/evaluation/Detect/Quantized_Model/` |
+| Detect (FPGA NPZ) | `vitis-ai/evaluation/Detect/Compiled_Model/` |
+| OBB (ONNX) | `vitis-ai/evaluation/OBB/Quantized_Model/` |
+| OBB (FPGA NPZ) | `vitis-ai/evaluation/OBB/Compiled_Model/` |
 
-Pass the `*_config_no_srd_reg_nc_dfl.pkl` from quantization via `--quant-meta`.
+Pass the `*_config_no_srd_reg_nc_dfl.pkl` from quantization to post-processing scripts.
 
 Details: [vitis-ai/evaluation/README.md](vitis-ai/evaluation/README.md)
 
 ### Phase 5: On-target inference (optional)
 
-Copy the compiled `.xmodel` and config pickle to `vitis-ai/inference/*/model/`.
-
-| Variant                    | Path                          |
-| -------------------------- | ----------------------------- |
-| YOLOv26 detect / OBB video | `vitis-ai/inference/YOLOv26/` |
-| YOLOv11 C++ FPS + video    | `vitis-ai/inference/YOLOv11/` |
+Copy compiled `.xmodel` and config pickle to `vitis-ai/inference/**/model/`.
 
 Details: [vitis-ai/inference/README.md](vitis-ai/inference/README.md)
 

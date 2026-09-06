@@ -88,13 +88,13 @@ def run_cross_validation():
     """Run k-fold cross-validation and return the summary DataFrame."""
     cv_cfg = load_config("cross_validation")
 
-    source_path = Path(cv_cfg.get("dataset_path", "./dataset"))
+    source_path = Path(cv_cfg.get("dataset_path", "./dataset/hpd3_320/yolov8"))
     target_images_path = source_path / "images"
     target_labels_path = source_path / "labels"
     yaml_file = Path(cv_cfg.get("data_yaml_path", source_path / "data.yaml"))
     ksplit = cv_cfg.get("k_splits", 10)
     random_state = cv_cfg.get("random_state", 42)
-    model_path = cv_cfg.get("model", "yolo26n.pt")
+    model_path = cv_cfg.get("model", "yolov8n.pt")
 
     require_file(yaml_file, "Dataset yaml")
     _copy_split_files(source_path, target_images_path, target_labels_path)

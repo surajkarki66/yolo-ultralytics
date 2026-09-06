@@ -104,39 +104,6 @@ class Proto(nn.Module):
         """Perform a forward pass through layers using an upsampled input image."""
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
 
-class Proto26(Proto):
-    """Ultralytics YOLO26 models mask Proto module for segmentation models."""
-
-    def __init__(self, ch: tuple = (), c_: int = 256, c2: int = 32, nc: int = 80):
-        """Initialize the Ultralytics YOLO models mask Proto module with specified number of protos and masks.
-
-        Args:
-            ch (tuple): Tuple of channel sizes from backbone feature maps.
-            c_ (int): Intermediate channels.
-            c2 (int): Output channels (number of protos).
-            nc (int): Number of classes for semantic segmentation.
-        """
-        super().__init__(c_, c_, c2)
-        self.feat_refine = nn.ModuleList(Conv(x, ch[0], k=1) for x in ch[1:])
-        self.feat_fuse = Conv(ch[0], c_, k=3)
-        self.semseg = nn.Sequential(Conv(ch[0], c_, k=3), Conv(c_, c_, k=3), nn.Conv2d(c_, nc, 1))
-
-    def forward(self, x: torch.Tensor, return_semseg: bool = True) -> torch.Tensor:
-        """Perform a forward pass by fusing multi-scale feature maps and generating proto masks."""
-        feat = x[0]
-        for i, f in enumerate(self.feat_refine):
-            up_feat = f(x[i + 1])
-            up_feat = F.interpolate(up_feat, size=feat.shape[2:], mode="nearest")
-            feat = feat + up_feat
-        p = super().forward(self.feat_fuse(feat))
-        if self.training and return_semseg:
-            semseg = self.semseg(feat)
-            return (p, semseg)
-        return p
-
-    def fuse(self):
-        """Fuse the model for inference by removing the semantic segmentation head."""
-        self.semseg = None
 
 class HGStem(nn.Module):
     """
@@ -249,33 +216,29 @@ class SPP(nn.Module):
 class SPPF(nn.Module):
     """Spatial Pyramid Pooling - Fast (SPPF) layer for YOLOv5 by Glenn Jocher."""
 
-    def __init__(self, c1: int, c2: int, k: int = 5, n: int = 3, shortcut: bool = False):
-        """Initialize the SPPF layer with given input/output channels and kernel size.
+    def __init__(self, c1: int, c2: int, k: int = 5):
+        """
+        Initialize the SPPF layer with given input/output channels and kernel size.
 
         Args:
             c1 (int): Input channels.
             c2 (int): Output channels.
             k (int): Kernel size.
-            n (int): Number of pooling iterations.
-            shortcut (bool): Whether to use shortcut connection.
 
         Notes:
             This module is equivalent to SPP(k=(5, 9, 13)).
         """
         super().__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1, act=False)
-        self.cv2 = Conv(c_ * (n + 1), c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_ * 4, c2, 1, 1)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
-        self.n = n
-        self.add = shortcut and c1 == c2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply sequential pooling operations to input and return concatenated feature maps."""
         y = [self.cv1(x)]
-        y.extend(self.m(y[-1]) for _ in range(getattr(self, "n", 3)))
-        y = self.cv2(torch.cat(y, 1))
-        return y + x if getattr(self, "add", False) else y
+        y.extend(self.m(y[-1]) for _ in range(3))
+        return self.cv2(torch.cat(y, 1))
 
 
 class C1(nn.Module):
@@ -403,6 +366,7 @@ class C2f(nn.Module):
             y_curr = m(y_curr)
             y_outputs.append(y_curr)
         return self.cv2(torch.cat(y_outputs, 1))
+
 
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
@@ -563,9 +527,6 @@ class Bottleneck(nn.Module):
             e (float): Expansion ratio.
         """
         super().__init__()
-        # Compatibility for forks/callers that may pass (g, shortcut) positionally.
-        if isinstance(g, bool) and isinstance(shortcut, (bool, int)):
-            shortcut, g = bool(g), int(shortcut)
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
@@ -1266,12 +1227,9 @@ class C3k2(C2f):
             g (int): Groups for convolutions.
             shortcut (bool): Whether to use shortcut connections.
         """
-        super().__init__(c1=c1, c2=c2, n=n, shortcut=shortcut, g=g, e=e)
+        super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(
-            C3k(self.c, self.c, 2, shortcut=shortcut, g=g)
-            if c3k
-            else Bottleneck(self.c, self.c, shortcut=shortcut, g=g)
-            for _ in range(n)
+            C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
         )
 
 
@@ -1445,81 +1403,34 @@ class C2fCIB(C2f):
         self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
 
 
-## DPU
-class Attention(torch.nn.Module):
-    """DPU-compatible Attention Block"""
-    def __init__(self, ch, num_head):
-        super().__init__()
-        self.num_head = num_head
-        self.dim_head = ch // num_head
-        self.dim_key = self.dim_head // 2
-        self.scale = self.dim_key ** -0.5
-
-        self.qkv = Conv(ch, ch + self.dim_key * num_head * 2, 1, act=torch.nn.Identity())
-
-        self.conv1 = Conv(ch, ch, k=3, p=1, g=ch, act=torch.nn.Identity())
-        self.conv2 = Conv(ch, ch, 1, act=torch.nn.Identity())
-        
-        total_channels = ch + self.dim_key * num_head * 2
-        self.q_channels = self.dim_key * num_head
-        self.k_channels = self.dim_key * num_head
-        self.v_channels = ch
-        
-        # Create conv layers to extract q, k, v
-        self.extract_q = torch.nn.Conv2d(total_channels, self.q_channels, 1, bias=False)
-        self.extract_k = torch.nn.Conv2d(total_channels, self.k_channels, 1, bias=False)
-        self.extract_v = torch.nn.Conv2d(total_channels, self.v_channels, 1, bias=False)
-        
-        # Projection layer to match attention channels with value channels
-        self.attn_proj = torch.nn.Conv2d(self.q_channels, self.v_channels, 1, bias=False)
-        
-        # Initialize weights
-        with torch.no_grad():
-            # Q extraction
-            self.extract_q.weight.zero_()
-            for i in range(self.q_channels):
-                self.extract_q.weight[i, i, 0, 0] = 1.0
-            
-            # K extraction
-            self.extract_k.weight.zero_()
-            for i in range(self.k_channels):
-                self.extract_k.weight[i, self.q_channels + i, 0, 0] = 1.0
-            
-            # V extraction
-            self.extract_v.weight.zero_()
-            for i in range(self.v_channels):
-                self.extract_v.weight[i, self.q_channels + self.k_channels + i, 0, 0] = 1.0
-            
-            # Initialize projection to average pooling
-            self.attn_proj.weight.fill_(1.0 / self.q_channels)
-        
-        # Hardsigmoid
-        self.attn_act = torch.nn.Hardsigmoid()
-
-    def forward(self, x):
-        qkv = self.qkv(x)
-
-        # Extract q, k, v using convolutions
-        q = self.extract_q(qkv)  # [b, q_channels, h, w]
-        k = self.extract_k(qkv)  # [b, k_channels, h, w]
-        v = self.extract_v(qkv)  # [b, v_channels=ch, h, w]
-        
-        # Compute attention: q*k produces [b, q_channels, h, w]
-        # Project to match v's channel dimension using 1x1 conv
-        qk = q * k * self.scale  # [b, q_channels, h, w]
-        attn = self.attn_act(self.attn_proj(qk))  # [b, v_channels=ch, h, w]
-        
-        # Apply attention with element-wise multiplication
-        x = v * attn + self.conv1(v)
-        return self.conv2(x)
-    
-    
-## DPU with CPU offloading
-'''
 class Attention(nn.Module):
-    """DPU-compatible Attention: q/k/v via 1x1 convs, N×N scores via mul+sum, Hardsigmoid, permute on CPU."""
+    """
+    Attention module that performs self-attention on the input tensor.
+
+    Args:
+        dim (int): The input tensor dimension.
+        num_heads (int): The number of attention heads.
+        attn_ratio (float): The ratio of the attention key dimension to the head dimension.
+
+    Attributes:
+        num_heads (int): The number of attention heads.
+        head_dim (int): The dimension of each attention head.
+        key_dim (int): The dimension of the attention key.
+        scale (float): The scaling factor for the attention scores.
+        qkv (Conv): Convolutional layer for computing the query, key, and value.
+        proj (Conv): Convolutional layer for projecting the attended values.
+        pe (Conv): Convolutional layer for positional encoding.
+    """
 
     def __init__(self, dim: int, num_heads: int = 8, attn_ratio: float = 0.5):
+        """
+        Initialize multi-head attention module.
+
+        Args:
+            dim (int): Input dimension.
+            num_heads (int): Number of attention heads.
+            attn_ratio (float): Attention ratio for key dimension.
+        """
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -1527,64 +1438,33 @@ class Attention(nn.Module):
         self.scale = self.key_dim**-0.5
         nh_kd = self.key_dim * num_heads
         h = dim + nh_kd * 2
-
         self.qkv = Conv(dim, h, 1, act=False)
-        self.total_ch = h
-        self.q_ch = nh_kd
-        self.k_ch = nh_kd
-        self.v_ch = dim
-
-        self.extract_q = nn.Conv2d(self.total_ch, self.q_ch, 1, bias=False)
-        self.extract_k = nn.Conv2d(self.total_ch, self.k_ch, 1, bias=False)
-        self.extract_v = nn.Conv2d(self.total_ch, self.v_ch, 1, bias=False)
-        self._init_selection_weights()
-
-        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
         self.proj = Conv(dim, dim, 1, act=False)
-        self.attn_act = nn.Hardsigmoid()
-
-    def _init_selection_weights(self):
-        with torch.no_grad():
-            self.extract_q.weight.zero_()
-            for i in range(self.q_ch):
-                self.extract_q.weight[i, i, 0, 0] = 1.0
-
-            self.extract_k.weight.zero_()
-            for i in range(self.k_ch):
-                self.extract_k.weight[i, self.q_ch + i, 0, 0] = 1.0
-
-            self.extract_v.weight.zero_()
-            for i in range(self.v_ch):
-                self.extract_v.weight[i, self.q_ch + self.k_ch + i, 0, 0] = 1.0
+        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Attention module.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            (torch.Tensor): The output tensor after self-attention.
+        """
         B, C, H, W = x.shape
         N = H * W
-
         qkv = self.qkv(x)
-        q = self.extract_q(qkv)
-        k = self.extract_k(qkv)
-        v = self.extract_v(qkv)
+        q, k, v = qkv.view(B, self.num_heads, self.key_dim * 2 + self.head_dim, N).split(
+            [self.key_dim, self.key_dim, self.head_dim], dim=2
+        )
 
-        q = q.view(B, self.num_heads, self.key_dim, N)
-        k = k.view(B, self.num_heads, self.key_dim, N)
-        v = v.view(B, self.num_heads, self.head_dim, N)
+        attn = (q.transpose(-2, -1) @ k) * self.scale
+        attn = attn.softmax(dim=-1)
+        x = (v @ attn.transpose(-2, -1)).view(B, C, H, W) + self.pe(v.reshape(B, C, H, W))
+        x = self.proj(x)
+        return x
 
-        q_exp = q.unsqueeze(-1)
-        k_exp = k.unsqueeze(-2)
-        attn = (q_exp * k_exp).sum(dim=2) * self.scale
-
-        attn = self.attn_act(attn)
-        attn_t = attn.transpose(-2, -1)
-
-        v_exp = v.unsqueeze(-1)
-        attn_exp = attn_t.unsqueeze(2)
-        out = (v_exp * attn_exp).sum(dim=3)
-
-        out = out.reshape(B, C, H, W)
-        out = out + self.pe(v.reshape(B, C, H, W))
-        return self.proj(out)
-'''
 
 class PSABlock(nn.Module):
     """
@@ -1738,21 +1618,7 @@ class C2PSA(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv(2 * self.c, c1, 1)
 
-        self.m = nn.Sequential(*(PSABlock(self.c, num_heads=self.c // 64) for _ in range(n)))
-
-        # Channel selector convs to replace split (DPU compatible - no strided_slice)
-        self.ch_select_a = nn.Conv2d(2 * self.c, self.c, 1, bias=False, groups=1)
-        self.ch_select_b = nn.Conv2d(2 * self.c, self.c, 1, bias=False, groups=1)
-        self._init_channel_selectors()
-
-    def _init_channel_selectors(self):
-        """Initialize channel selector weights to extract first/second half of channels."""
-        with torch.no_grad():
-            self.ch_select_a.weight.zero_()
-            self.ch_select_b.weight.zero_()
-            for i in range(self.c):
-                self.ch_select_a.weight[i, i, 0, 0] = 1.0  # Select first c channels
-                self.ch_select_b.weight[i, i + self.c, 0, 0] = 1.0  # Select second c channels
+        self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1764,9 +1630,7 @@ class C2PSA(nn.Module):
         Returns:
             (torch.Tensor): Output tensor after processing.
         """
-        out = self.cv1(x)
-        a = self.ch_select_a(out)
-        b = self.ch_select_b(out)
+        a, b = self.cv1(x).split((self.c, self.c), dim=1)
         b = self.m(b)
         return self.cv2(torch.cat((a, b), 1))
 
@@ -2275,63 +2139,3 @@ class SAVPE(nn.Module):
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
 
-
-class RealNVP(nn.Module):
-    """RealNVP: a flow-based generative model.
-
-    References:
-        https://arxiv.org/abs/1605.08803
-        https://github.com/open-mmlab/mmpose/blob/main/mmpose/models/utils/realnvp.py
-    """
-
-    @staticmethod
-    def nets():
-        """Get the scale model in a single invertible mapping."""
-        return nn.Sequential(nn.Linear(2, 64), nn.SiLU(), nn.Linear(64, 64), nn.SiLU(), nn.Linear(64, 2), nn.Tanh())
-
-    @staticmethod
-    def nett():
-        """Get the translation model in a single invertible mapping."""
-        return nn.Sequential(nn.Linear(2, 64), nn.SiLU(), nn.Linear(64, 64), nn.SiLU(), nn.Linear(64, 2))
-
-    @property
-    def prior(self):
-        """The prior distribution."""
-        return torch.distributions.MultivariateNormal(self.loc, self.cov)
-
-    def __init__(self):
-        super().__init__()
-
-        self.register_buffer("loc", torch.zeros(2))
-        self.register_buffer("cov", torch.eye(2))
-        self.register_buffer("mask", torch.tensor([[0, 1], [1, 0]] * 3, dtype=torch.float32))
-
-        self.s = torch.nn.ModuleList([self.nets() for _ in range(len(self.mask))])
-        self.t = torch.nn.ModuleList([self.nett() for _ in range(len(self.mask))])
-        self.init_weights()
-
-    def init_weights(self):
-        """Initialize model weights."""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.01)
-
-    def backward_p(self, x):
-        """Apply mapping from the data space to the latent space and calculate the log determinant of the Jacobian
-        matrix.
-        """
-        log_det_jacob, z = x.new_zeros(x.shape[0]), x
-        for i in reversed(range(len(self.t))):
-            z_ = self.mask[i] * z
-            s = self.s[i](z_) * (1 - self.mask[i])
-            t = self.t[i](z_) * (1 - self.mask[i])
-            z = (1 - self.mask[i]) * (z - t) * torch.exp(-s) + z_
-            log_det_jacob -= s.sum(dim=1)
-        return z, log_det_jacob
-
-    def log_prob(self, x):
-        """Calculate the log probability of given sample in data space."""
-        if x.dtype == torch.float32 and self.s[0][0].weight.dtype != torch.float32:
-            self.float()
-        z, log_det = self.backward_p(x)
-        return self.prior.log_prob(z) + log_det

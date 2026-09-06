@@ -1,22 +1,17 @@
 import os
-from pathlib import Path
 
-IMG_FORMATS = {".bmp", ".dng", ".jpeg", ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp", ".pfm"}
-output_file = Path("./data/val_ids.txt")
+# Set your image directory path here
+image_dir = './data/val/'
+output_file = './data/val_ids.txt'
 
-# Prefer data/val/; fall back to data/ when images live there directly.
-image_dir = Path("./data/val")
-if not image_dir.is_dir() or not any(image_dir.iterdir()):
-    image_dir = Path("./data")
+# Get list of all files (you can add filtering for specific formats if needed)
+image_files = [f for f in os.listdir(image_dir) if os.path.isfile(os.path.join(image_dir, f))]
 
-image_files = sorted(
-    p.name
-    for p in image_dir.iterdir()
-    if p.is_file() and p.suffix.lower() in IMG_FORMATS
-)
+# Write full paths to val_ids.txt
+with open(output_file, 'w') as f:
+    for img in image_files:
+        full_path = os.path.abspath(os.path.join(image_dir, img))
+        f.write(full_path + '\n')
 
-with open(output_file, "w", encoding="utf-8") as f:
-    for name in image_files:
-        f.write(name + "\n")
+print(f"Saved {len(image_files)} file paths to {output_file}")
 
-print(f"Saved {len(image_files)} image names from {image_dir} to {output_file}")

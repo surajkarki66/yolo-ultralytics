@@ -1,27 +1,70 @@
 # Vitis AI compilation
 
-This directory compiles quantized XIR models (`.xmodel`) for the target DPU on the board. Use it after quantization (see `vitis-ai/quantization/README.md`).
+Compile quantized `.xmodel` files for your target DPU using `vai_c_xir`.
 
-## Structure
+## Layout
 
-- **Architectures/** — DPU architecture JSON files (`arch_B512.json` through `arch_B4096.json`) for different board configurations. Choose the one that matches your target (e.g. `arch_B4096.json` for DPUCZDX8G_ISA1_B4096).
-- **model/** — Place quantized `.xmodel` files here before compilation:
-  - `DetectionModel_int.xmodel` — YOLOv26 / YOLOv11 detection
-  - `OBBModel_int.xmodel` — YOLOv26-OBB / YOLOv11-OBB
-- **run_compile.sh** — Example script that invokes `vai_c_xir` to compile the XIR model for a given architecture and output directory.
+```text
+compilation/
+  model/                    # input .xmodel files (see model/README.md)
+  DPUCZDX8G/               # arch_B512.json … arch_B4096.json
+  DPUCZDX8G/Single_Core/    # single-core variants (same B* names)
+  run_compile.sh            # commented examples per DPU size
+  zynq_output/              # created after compile (gitignored)
+```
 
-## Procedure
+## Inputs
 
-1. Copy the quantized `.xmodel` from the quantization step into `model/`:
-   - Detection: `DetectionModel_int.xmodel`
-   - OBB: `OBBModel_int.xmodel`
-2. Choose the architecture file from `Architectures/` that matches your target DPU (e.g. B4096, B3136, B2304).
-3. Run the compiler, e.g.:
+Copy from `../quantization/quantize_result/` into `model/`:
 
-   ```bash
-   vai_c_xir -x model/DetectionModel_int.xmodel -a ./Architectures/arch_B4096.json -o zynq_output/yolov26n/ -n yolov26n
-   ```
+| Model | File in `model/` |
+|-------|-------------------|
+| YOLOv8 Detect | `DetectionModel_int.xmodel` |
+| YOLOv8-OBB | `OBBModel_int.xmodel` |
 
-   Or uncomment and run the appropriate line(s) in `run_compile.sh` for your target architecture and model (Detection vs OBB).
+## Compile
 
-4. Use the compiled output in `zynq_output/` (or your chosen `-o` path) for deployment on the device. The evaluation scripts in `vitis-ai/evaluation/` can be used to validate accuracy with the compiled model.
+**Option A — edit `run_compile.sh`**
+
+Uncomment the pair of lines for your DPU (Detect + OBB if needed), then:
+
+```bash
+cd vitis-ai/compilation
+bash run_compile.sh
+```
+
+**Option B — run `vai_c_xir` directly**
+
+Detect (B4096 example):
+
+```bash
+cd vitis-ai/compilation
+vai_c_xir \
+  -x model/DetectionModel_int.xmodel \
+  -a DPUCZDX8G/arch_B4096.json \
+  -o zynq_output/yolov8n/ \
+  -n yolov8n
+```
+
+OBB:
+
+```bash
+vai_c_xir \
+  -x model/OBBModel_int.xmodel \
+  -a DPUCZDX8G/arch_B4096.json \
+  -o zynq_output/yolov8n_obb/ \
+  -n yolov8n_obb
+```
+
+Single-core DPU: use `DPUCZDX8G/Single_Core/arch_B4096.json` (or matching `B*`).
+
+## Outputs
+
+Compiled artifacts land under `zynq_output/<name>/`. Copy the deployed `.xmodel` and config pickle to:
+
+- `../evaluation/*/Compiled_Model/` for NPZ-based validation
+- `../inference/cpp_fps_testing/*/model/` or `../inference/realtime_inference/` for on-target demos
+
+## Next step
+
+Validate with scripts under [../evaluation/README.md](../evaluation/README.md).

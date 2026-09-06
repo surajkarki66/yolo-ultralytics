@@ -1,15 +1,15 @@
 # Vitis AI deployment pipeline
 
-End-to-end flow for deploying **YOLOv26** / **YOLOv11** (Detect and OBB) on AMD DPU (Zynq/Kria) using Vitis AI:
+End-to-end flow for deploying YOLOv8 **Detect** and YOLOv8 **OBB** on AMD DPU (Zynq/Kria) using Vitis AI:
 
 1. **Inspection** (optional) — validate DPU compatibility before quantization
 2. **Quantization** — calibrate and export `.xmodel` (+ config pickle)
 3. **Compilation** — build device-ready artifacts with `vai_c_xir`
 4. **Evaluation** — post-process and score (ONNX / NPZ paths)
-5. **Inference** (optional) — on-target C++ FPS and realtime demos
+5. **Inference** (optional) — C++ FPS benches and realtime demos on target
 
-> **Environment:** Use the Vitis AI Docker image and `conda activate vitis-ai-pytorch` for quantization and inspection.  
-> **Ultralytics:** The Vitis path expects **`ultralytics==8.4.24`** (see `quantization/requirements.txt`). Root training uses the same version via `requirements.txt`. Patch Ultralytics separately in each Vitis step (see below).
+> **Environment:** Use the Vitis AI Docker image and `conda activate vitis-ai-pytorch` for quantization.  
+> **Ultralytics:** The quantization path expects **`ultralytics==8.1.47`** (see `quantization/requirements.txt`). The main repo training stack may use a newer Ultralytics version via root `requirements.txt`.
 
 ## Directory layout
 
@@ -17,13 +17,17 @@ End-to-end flow for deploying **YOLOv26** / **YOLOv11** (Detect and OBB) on AMD 
 vitis-ai/
   inspection/            # NNDCT Inspector before quantization (optional)
   quantization/          # vai_q_yolo.py, calibration data, custom_layers patch
-  compilation/           # vai_c_xir inputs (model/) + Architectures/
+  compilation/           # vai_c_xir inputs (model/) + DPU arch JSON
   evaluation/
-    Quantized_Model/     # ONNX eval (detect or OBB via --task)
-    Compiled_Model/      # FPGA NPZ inference + eval
+    Detect/
+      Quantized_Model/   # ONNX → boxes → COCO metrics
+      Compiled_Model/    # FPGA NPZ → boxes → COCO metrics
+    OBB/
+      Quantized_Model/   # ONNX → OBB metrics (no pycocotools)
+      Compiled_Model/    # FPGA NPZ → OBB metrics / visualization
   inference/
-    YOLOv26/             # Realtime client/server + video (YOLOv26)
-    YOLOv11/             # C++ FPS + video (YOLOv11 / YOLOv11-OBB)
+    cpp_fps_testing/     # On-board FPS (C++)
+    realtime_inference/  # Client / server / video demos
 ```
 
 ## Quick pipeline
@@ -53,7 +57,7 @@ python vai_q_yolo.py --model_path best.pt --batch_size 1 --img_height 416 --img_
 
 Outputs (under `quantization/quantize_result/`):
 
-- `DetectionModel_int.xmodel` or `OBBModel_int.xmodel`
+- `DetectionModel_int.xmodel` or deploy export name from Vitis
 - `{checkpoint_stem}_config_no_srd_reg_nc_dfl.pkl` (e.g. `best_config_no_srd_reg_nc_dfl.pkl`)
 
 See [quantization/README.md](quantization/README.md).
@@ -63,19 +67,16 @@ See [quantization/README.md](quantization/README.md).
 ```bash
 cd vitis-ai/compilation
 # Copy .xmodel files into model/ first (see model/README.md)
-# Uncomment the target DPU block in run_compile.sh, then run the matching line
+# Uncomment the target DPU block in run_compile.sh, then:
+bash run_compile.sh
 ```
 
 See [compilation/README.md](compilation/README.md).
 
 ### 3. Evaluate
 
-- **ONNX (quantized):** [evaluation/README.md](evaluation/README.md) — `Quantized_Model/eval_onnx.py`
-- **FPGA NPZ (compiled):** `Compiled_Model/fpga_inference.py` → `eval_predictions_npz.py`
-
-Pass the config pickle from quantization to both evaluation paths.
-
-See [evaluation/README.md](evaluation/README.md).
+- **Detect:** [evaluation/README.md](evaluation/README.md) — `Detect/Quantized_Model` (ONNX) or `Detect/Compiled_Model` (NPZ from FPGA)
+- **OBB:** same README — `OBB/Quantized_Model` or `OBB/Compiled_Model`
 
 ### 4. Run on device (optional)
 
@@ -89,4 +90,4 @@ See [inference/README.md](inference/README.md).
 | `quantization/quantize_result/` | `evaluation/*/` | `*_config_no_srd_reg_nc_dfl.pkl` |
 | `compilation/zynq_output/` | `inference/**/model/` | Compiled `.xmodel` for on-target apps |
 
-Rename or copy `quantize_result` after each run if you keep multiple DPU sizes (see `quantization/run_compression.sh`).
+Rename or copy `quantize_result` after each run if you keep multiple DPU sizes (see `run_compression.sh`).

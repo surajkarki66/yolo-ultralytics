@@ -174,8 +174,8 @@ cython_debug/
 .pypirc
 
 runs/
-inspect/
 output/
+inspect/
 wandb/
 
 *.pt

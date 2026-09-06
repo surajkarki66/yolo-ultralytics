@@ -1,5 +1,5 @@
 [project]
-name = "yolov26-ultralytics"
+name = "yolov8-ultralytics"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
     "supervision==0.25.1",
     "tensorrt==10.11.0.33",
     "tqdm==4.67.1",
-    "ultralytics==8.4.24",
+    "ultralytics==8.3.146",
     "ultralytics-thop==2.0.0",
 ]
 
