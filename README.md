@@ -31,8 +31,6 @@ If you use this code or build upon this work, please cite:
   doi={10.23919/DSDCPS00089.2026.00025}}
 ```
 
-The DOI for the published conference version will be added once it is available.
-
 ## Version Compatibility
 
 * This repository can be adapted for multiple YOLO versions in general workflows.
