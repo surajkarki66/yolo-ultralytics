@@ -19,15 +19,16 @@ The work was presented at the **29th Euromicro Conference Series on Digital Syst
 If you use this code or build upon this work, please cite:
 
 ```bibtex
-@misc{karki2026attentionproblemdpuawareattention,
-  title={No Attention, No Problem: DPU-Aware Attention Approximation in Modern YOLO on FPGA},
-  author={Suraj Karki and Qazi Arbab Ahmed and Thorsten Jungeblut},
+@INPROCEEDINGS{11732448,
+  author={Karki, Suraj and Ahmed, Qazi Arbab and Jungeblut, Thorsten},
+  booktitle={2026 29th Euromicro Conference on Digital System Design (DSD)}, 
+  title={No Attention, No Problem: DPU-Aware Attention Approximation in Modern YOLO on FPGA}, 
   year={2026},
-  eprint={2607.13106},
-  archivePrefix={arXiv},
-  primaryClass={cs.AR},
-  url={https://arxiv.org/abs/2607.13106}
-}
+  volume={},
+  number={},
+  pages={106-113},
+  keywords={Modeling;Object detection;Field programmable gate arrays;YOLO;Architecture;Computer architecture;Quantization (signal);Signal detection;Standards;System-on-chip;FPGA;Object Detection;YOLO;Oriented Bounding Box;Vitis AI;Edge Computing;Deep Learning Accelerator;Quantization},
+  doi={10.23919/DSDCPS00089.2026.00025}}
 ```
 
 The DOI for the published conference version will be added once it is available.
